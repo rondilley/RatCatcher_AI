@@ -1,0 +1,12 @@
+# RatCatcher AI -- Training Dependencies
+#
+# Install PyTorch with CUDA first:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+#
+# Then install the rest:
+#   pip install -r training/requirements.txt
+
+ultralytics>=8.2
+pandas>=2.0
+requests>=2.28
+tqdm>=4.65

@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ratcatcher"
+version = "0.1.0"
+description = "Wildlife detection system for bird feeders using neural networks on Raspberry Pi 5"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "opencv-python-headless>=4.8",
+    "numpy>=1.24",
+    "pyyaml>=6.0",
+    "Pillow>=10.0",
+]
+
+[project.optional-dependencies]
+rpi = [
+    "picamera2>=0.3.17",
+]
+dev = [
+    "pytest>=7.0",
+    "opencv-python>=4.8",
+]
+cpu = [
+    "ncnn>=1.0.20230816",
+]
+
+[project.scripts]
+ratcatcher = "ratcatcher.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

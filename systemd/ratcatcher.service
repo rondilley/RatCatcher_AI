@@ -1,0 +1,36 @@
+[Unit]
+Description=RatCatcher AI Wildlife Detection
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ratcatcher
+Group=video
+WorkingDirectory=/opt/ratcatcher
+ExecStart=/opt/ratcatcher/.venv/bin/ratcatcher run --config /opt/ratcatcher/config/default.yaml
+Restart=on-failure
+RestartSec=10
+WatchdogSec=60
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ratcatcher
+
+# Resource limits
+MemoryMax=3G
+CPUQuota=90%
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/ratcatcher/data /var/log/ratcatcher
+ProtectHome=true
+
+# Camera and Hailo device access
+SupplementaryGroups=video i2c gpio
+DeviceAllow=/dev/video* rw
+DeviceAllow=/dev/hailo* rw
+
+[Install]
+WantedBy=multi-user.target

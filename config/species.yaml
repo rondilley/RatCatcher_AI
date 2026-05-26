@@ -1,0 +1,295 @@
+# RatCatcher AI -- Western US Bird Feeder Species Taxonomy
+#
+# Each species has:
+#   genus_species: Binomial name (current taxonomy)
+#   common_name: Common English name
+#   family: Taxonomic family
+#   label_index: Model output class index in the iNaturalist bird model
+#                (mobilenet_v2_inat_bird_quant.tflite, 965 classes)
+#
+# Model uses older genus names for some woodpeckers (Picoides vs Dryobates).
+# We use current taxonomy here; the label_index handles the mapping.
+#
+# Pest species have a 'category' field used by the YOLO detection stage.
+
+birds:
+  # Corvidae (Jays and Crows)
+  - genus_species: "Aphelocoma californica"
+    common_name: "California Scrub-Jay"
+    family: "Corvidae"
+    label_index: 672
+  - genus_species: "Cyanocitta stelleri"
+    common_name: "Steller's Jay"
+    family: "Corvidae"
+    label_index: 4
+  - genus_species: "Corvus brachyrhynchos"
+    common_name: "American Crow"
+    family: "Corvidae"
+    label_index: 867
+
+  # Paridae (Chickadees and Titmice)
+  - genus_species: "Poecile atricapillus"
+    common_name: "Black-capped Chickadee"
+    family: "Paridae"
+    label_index: 659
+  - genus_species: "Poecile gambeli"
+    common_name: "Mountain Chickadee"
+    family: "Paridae"
+    label_index: 660
+  - genus_species: "Poecile rufescens"
+    common_name: "Chestnut-backed Chickadee"
+    family: "Paridae"
+    label_index: 661
+  - genus_species: "Baeolophus inornatus"
+    common_name: "Oak Titmouse"
+    family: "Paridae"
+    label_index: 649
+
+  # Aegithalidae (Bushtits)
+  - genus_species: "Psaltriparus minimus"
+    common_name: "Bushtit"
+    family: "Aegithalidae"
+    label_index: 879
+
+  # Sittidae (Nuthatches)
+  - genus_species: "Sitta carolinensis"
+    common_name: "White-breasted Nuthatch"
+    family: "Sittidae"
+    label_index: 807
+  - genus_species: "Sitta canadensis"
+    common_name: "Red-breasted Nuthatch"
+    family: "Sittidae"
+    label_index: 777
+  - genus_species: "Sitta pygmaea"
+    common_name: "Pygmy Nuthatch"
+    family: "Sittidae"
+    label_index: 775
+
+  # Picidae (Woodpeckers)
+  # Model uses older genus Picoides; label_index maps correctly.
+  - genus_species: "Dryobates pubescens"
+    common_name: "Downy Woodpecker"
+    family: "Picidae"
+    label_index: 130
+  - genus_species: "Dryobates villosus"
+    common_name: "Hairy Woodpecker"
+    family: "Picidae"
+    label_index: 133
+  - genus_species: "Dryobates nuttallii"
+    common_name: "Nuttall's Woodpecker"
+    family: "Picidae"
+    label_index: 125
+  - genus_species: "Melanerpes formicivorus"
+    common_name: "Acorn Woodpecker"
+    family: "Picidae"
+    label_index: 184
+  - genus_species: "Colaptes auratus"
+    common_name: "Northern Flicker"
+    family: "Picidae"
+    label_index: 185
+
+  # Trochilidae (Hummingbirds)
+  - genus_species: "Calypte anna"
+    common_name: "Anna's Hummingbird"
+    family: "Trochilidae"
+    label_index: 750
+  - genus_species: "Selasphorus rufus"
+    common_name: "Rufous Hummingbird"
+    family: "Trochilidae"
+    label_index: 755
+  - genus_species: "Selasphorus calliope"
+    common_name: "Calliope Hummingbird"
+    family: "Trochilidae"
+    label_index: 329
+  - genus_species: "Archilochus alexandri"
+    common_name: "Black-chinned Hummingbird"
+    family: "Trochilidae"
+    label_index: 763
+
+  # Fringillidae (Finches)
+  - genus_species: "Haemorhous mexicanus"
+    common_name: "House Finch"
+    family: "Fringillidae"
+    label_index: 320
+  - genus_species: "Haemorhous purpureus"
+    common_name: "Purple Finch"
+    family: "Fringillidae"
+    label_index: 321
+  - genus_species: "Spinus tristis"
+    common_name: "American Goldfinch"
+    family: "Fringillidae"
+    label_index: 730
+  - genus_species: "Spinus psaltria"
+    common_name: "Lesser Goldfinch"
+    family: "Fringillidae"
+    label_index: 728
+  - genus_species: "Spinus pinus"
+    common_name: "Pine Siskin"
+    family: "Fringillidae"
+    label_index: 726
+  - genus_species: "Coccothraustes vespertinus"
+    common_name: "Evening Grosbeak"
+    family: "Fringillidae"
+    label_index: 157
+
+  # Passerellidae (New World Sparrows)
+  - genus_species: "Junco hyemalis"
+    common_name: "Dark-eyed Junco"
+    family: "Passerellidae"
+    label_index: 193
+  - genus_species: "Zonotrichia leucophrys"
+    common_name: "White-crowned Sparrow"
+    family: "Passerellidae"
+    label_index: 693
+  - genus_species: "Zonotrichia atricapilla"
+    common_name: "Golden-crowned Sparrow"
+    family: "Passerellidae"
+    label_index: 92
+  - genus_species: "Melospiza melodia"
+    common_name: "Song Sparrow"
+    family: "Passerellidae"
+    label_index: 650
+  - genus_species: "Pipilo maculatus"
+    common_name: "Spotted Towhee"
+    family: "Passerellidae"
+    label_index: 120
+  - genus_species: "Melozone crissalis"
+    common_name: "California Towhee"
+    family: "Passerellidae"
+    label_index: 908
+  - genus_species: "Passerella iliaca"
+    common_name: "Fox Sparrow"
+    family: "Passerellidae"
+    label_index: 81
+
+  # Passeridae (Old World Sparrows)
+  - genus_species: "Passer domesticus"
+    common_name: "House Sparrow"
+    family: "Passeridae"
+    label_index: 671
+
+  # Columbidae (Doves and Pigeons)
+  - genus_species: "Zenaida macroura"
+    common_name: "Mourning Dove"
+    family: "Columbidae"
+    label_index: 441
+  - genus_species: "Streptopelia decaocto"
+    common_name: "Eurasian Collared-Dove"
+    family: "Columbidae"
+    label_index: 302
+  - genus_species: "Patagioenas fasciata"
+    common_name: "Band-tailed Pigeon"
+    family: "Columbidae"
+    label_index: 313
+
+  # Turdidae (Thrushes)
+  - genus_species: "Turdus migratorius"
+    common_name: "American Robin"
+    family: "Turdidae"
+    label_index: 484
+  - genus_species: "Sialia mexicana"
+    common_name: "Western Bluebird"
+    family: "Turdidae"
+    label_index: 522
+  - genus_species: "Ixoreus naevius"
+    common_name: "Varied Thrush"
+    family: "Turdidae"
+    label_index: 686
+
+  # Mimidae (Mockingbirds)
+  - genus_species: "Mimus polyglottos"
+    common_name: "Northern Mockingbird"
+    family: "Mimidae"
+    label_index: 890
+
+  # Tyrannidae (Flycatchers)
+  - genus_species: "Sayornis nigricans"
+    common_name: "Black Phoebe"
+    family: "Tyrannidae"
+    label_index: 56
+
+  # Sturnidae (Starlings)
+  - genus_species: "Sturnus vulgaris"
+    common_name: "European Starling"
+    family: "Sturnidae"
+    label_index: 781
+
+  # Icteridae (Blackbirds)
+  - genus_species: "Euphagus cyanocephalus"
+    common_name: "Brewer's Blackbird"
+    family: "Icteridae"
+    label_index: 232
+  - genus_species: "Molothrus ater"
+    common_name: "Brown-headed Cowbird"
+    family: "Icteridae"
+    label_index: 237
+
+  # Parulidae (Warblers)
+  - genus_species: "Setophaga coronata"
+    common_name: "Yellow-rumped Warbler"
+    family: "Parulidae"
+    label_index: 711
+
+  # Bombycillidae (Waxwings)
+  - genus_species: "Bombycilla cedrorum"
+    common_name: "Cedar Waxwing"
+    family: "Bombycillidae"
+    label_index: 894
+
+  # Accipitridae (Hawks -- feeder predators)
+  - genus_species: "Accipiter cooperii"
+    common_name: "Cooper's Hawk"
+    family: "Accipitridae"
+    label_index: 738
+  - genus_species: "Accipiter striatus"
+    common_name: "Sharp-shinned Hawk"
+    family: "Accipitridae"
+    label_index: 585
+
+  # Troglodytidae (Wrens)
+  - genus_species: "Thryomanes bewickii"
+    common_name: "Bewick's Wren"
+    family: "Troglodytidae"
+    label_index: 915
+
+pests:
+  - genus_species: "Sciurus griseus"
+    common_name: "Western Gray Squirrel"
+    category: "squirrel"
+  - genus_species: "Sciurus niger"
+    common_name: "Eastern Fox Squirrel"
+    category: "squirrel"
+  - genus_species: "Otospermophilus beecheyi"
+    common_name: "California Ground Squirrel"
+    category: "squirrel"
+  - genus_species: "Rattus norvegicus"
+    common_name: "Norway Rat"
+    category: "rat"
+  - genus_species: "Rattus rattus"
+    common_name: "Roof Rat"
+    category: "rat"
+  - genus_species: "Mus musculus"
+    common_name: "House Mouse"
+    category: "rat"
+  - genus_species: "Procyon lotor"
+    common_name: "Raccoon"
+    category: "unknown_animal"
+  - genus_species: "Didelphis virginiana"
+    common_name: "Virginia Opossum"
+    category: "unknown_animal"
+  - genus_species: "Felis catus"
+    common_name: "Domestic Cat"
+    category: "cat"
+
+# Detection stage class mapping (YOLO output classes)
+detection_classes:
+  - name: "bird"
+    id: 0
+  - name: "squirrel"
+    id: 1
+  - name: "rat"
+    id: 2
+  - name: "cat"
+    id: 3
+  - name: "unknown_animal"
+    id: 4

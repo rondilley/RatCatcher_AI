@@ -1,0 +1,118 @@
+# RatCatcher AI -- Default Configuration
+#
+# Override config directory via RATCATCHER_CONFIG_DIR environment variable.
+# Individual values can be overridden by placing a local.yaml in the same
+# directory (merged on top of this file).
+
+system:
+  data_dir: "data"
+  log_level: "INFO"
+  # Set to "rpi", "windows", or "auto" (auto-detect)
+  platform: "auto"
+
+cameras:
+  - id: 0
+    enabled: true
+    # "picamera", "webcam", or "file"
+    source_type: "auto"
+    resolution: [1920, 1080]
+    fps: 30
+    # For file source: path to video file or image directory
+    file_path: null
+    # For webcam source: device index
+    device_index: 0
+    # Region of interest (polygon vertices as [x, y] pairs, normalized 0-1)
+    # Empty list means full frame
+    roi: []
+
+  - id: 1
+    enabled: true
+    source_type: "auto"
+    resolution: [1920, 1080]
+    fps: 30
+    file_path: null
+    device_index: 1
+    roi: []
+
+motion:
+  enabled: true
+  # MOG2 parameters
+  history: 500
+  var_threshold: 16
+  detect_shadows: false
+  # Processing resolution (independent of camera resolution)
+  process_width: 320
+  process_height: 240
+  # Morphological cleanup
+  erode_kernel: 3
+  dilate_kernel: 7
+  # Minimum contour area as percentage of frame area (0.0 - 1.0)
+  min_area_pct: 0.005
+  # Seconds to suppress repeated detections in the same region
+  cooldown_seconds: 2.0
+  # MOG2 learning rate (-1 for auto)
+  learning_rate: -1
+
+detection:
+  enabled: true
+  # "auto", "hailo", "ncnn", or "opencv_dnn"
+  backend: "auto"
+  # Path to model file (relative to models/ directory)
+  model_path: "yolov8n.onnx"
+  # Minimum confidence to report a detection
+  confidence_threshold: 0.45
+  # Non-maximum suppression IoU threshold
+  nms_threshold: 0.45
+  # Model input size
+  input_size: [640, 640]
+
+classification:
+  enabled: true
+  # Path to TFLite model (relative to models/ directory)
+  # Default: Google iNaturalist MobileNet V2, INT8 quantized, 965 bird species
+  model_path: "mobilenet_v2_inat_bird_quant.tflite"
+  # Path to species taxonomy YAML
+  species_config: "species.yaml"
+  # Model input size (224x224 for MobileNet V2)
+  input_size: [224, 224]
+  # Number of top predictions to return
+  top_k: 5
+  # Minimum confidence to accept a species prediction
+  min_confidence: 0.70
+  # Use XNNPACK delegate for CPU acceleration
+  use_xnnpack: true
+
+storage:
+  # SQLite database path (relative to data_dir)
+  db_path: "detections.db"
+  # Video clip output directory (relative to data_dir)
+  clip_dir: "clips"
+  # Thumbnail output directory (relative to data_dir)
+  thumbnail_dir: "thumbnails"
+  # Seconds of video to keep before the detection event
+  clip_pre_seconds: 5
+  # Seconds of video to keep after the detection event
+  clip_post_seconds: 10
+  # Delete clips older than this many days (0 = never delete)
+  retention_days: 30
+  # Maximum total disk usage in GB for clips + thumbnails (0 = unlimited)
+  max_disk_gb: 10
+  # FFmpeg encoding preset (ultrafast, fast, medium)
+  ffmpeg_preset: "fast"
+
+alerts:
+  enabled: false
+  # Alert on these detection classes
+  alert_classes: ["squirrel", "rat", "cat", "unknown_animal"]
+  # Minimum seconds between alerts for the same class
+  cooldown_seconds: 300
+  # Alert methods (future: email, mqtt, webhook)
+  methods: []
+
+monitoring:
+  # System health check interval in seconds
+  health_interval_seconds: 60
+  # CPU temperature warning threshold (Celsius)
+  temp_warning_c: 75
+  # CPU temperature critical threshold (Celsius)
+  temp_critical_c: 82
