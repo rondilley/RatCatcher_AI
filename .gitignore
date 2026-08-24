@@ -26,12 +26,18 @@ models/*.onnx
 models/*.pt
 models/*.bin
 models/*.weights
+# BirdNET labels ship with the CC BY-NC-SA model package and are
+# downloaded by scripts/download_models.sh, not committed.
+models/BirdNET_*
 !models/.gitkeep
 
 # Media output
 output/
 clips/
 thumbnails/
+
+# Runtime data directory (database, clips, thumbnails, audio clips)
+data/
 
 # SQLite databases
 *.db
@@ -64,3 +70,14 @@ runs/
 training/cache/
 *.pt
 wandb/
+
+# Claude Code local state (machine-specific, not shared)
+.claude/settings.local.json
+.claude/projects/
+
+# HailoRT runtime logs (dropped in repo root by the driver)
+hailort.log
+hailort.*.log
+
+# Ultralytics weights downloaded to repo root
+/yolo*.pt

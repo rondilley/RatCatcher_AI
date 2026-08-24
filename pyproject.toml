@@ -7,7 +7,7 @@ name = "ratcatcher"
 version = "0.1.0"
 description = "Wildlife detection system for bird feeders using neural networks on Raspberry Pi 5"
 requires-python = ">=3.11"
-license = "MIT"
+license = "GPL-3.0-or-later"
 dependencies = [
     "opencv-python-headless>=4.8",
     "numpy>=1.24",
@@ -18,6 +18,13 @@ dependencies = [
 [project.optional-dependencies]
 rpi = [
     "picamera2>=0.3.17",
+]
+audio = [
+    # TFLite interpreter for BirdNET song identification and for the
+    # visual species classifier. tflite-runtime publishes no wheels for
+    # Python 3.13, which is what current Raspberry Pi OS ships;
+    # ai-edge-litert is its maintained successor and does.
+    "ai-edge-litert>=1.0",
 ]
 dev = [
     "pytest>=7.0",

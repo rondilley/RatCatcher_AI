@@ -42,13 +42,22 @@ try:
     _TFLITE_SOURCE = "tflite_runtime"
 except ImportError:
     try:
-        import tensorflow as _tf  # type: ignore[import-untyped]
+        # ai-edge-litert is Google's maintained successor to tflite-runtime
+        # and is the only one of the three with wheels for Python 3.13 on
+        # aarch64, which is what Raspberry Pi OS ships today.
+        from ai_edge_litert.interpreter import Interpreter as _LiteRTInterpreter  # type: ignore[import-untyped]
 
-        _Interpreter = _tf.lite.Interpreter
-        _TFLITE_SOURCE = "tensorflow"
+        _Interpreter = _LiteRTInterpreter
+        _TFLITE_SOURCE = "ai_edge_litert"
     except ImportError:
-        _Interpreter = None
-        _TFLITE_SOURCE = "none"
+        try:
+            import tensorflow as _tf  # type: ignore[import-untyped]
+
+            _Interpreter = _tf.lite.Interpreter
+            _TFLITE_SOURCE = "tensorflow"
+        except ImportError:
+            _Interpreter = None
+            _TFLITE_SOURCE = "none"
 
 _TFLITE_AVAILABLE: bool = _Interpreter is not None
 

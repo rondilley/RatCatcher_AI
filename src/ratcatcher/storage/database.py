@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sqlite3
 from pathlib import Path
 
@@ -32,6 +33,61 @@ CREATE TABLE IF NOT EXISTS detections (
 CREATE INDEX IF NOT EXISTS idx_detections_timestamp ON detections(timestamp);
 CREATE INDEX IF NOT EXISTS idx_detections_species ON detections(species);
 CREATE INDEX IF NOT EXISTS idx_detections_camera ON detections(camera_id);
+
+-- Bird song identifications from the I2S microphones.
+--
+-- Audio detections live in their own table rather than sharing the
+-- detections table above. They have no frame, no bounding box and no
+-- camera, while they do have a channel, a duration and acoustic
+-- measurements. Forcing both shapes into one table would mean a wide row
+-- that is mostly NULL whichever modality wrote it, and would require
+-- relaxing the NOT NULL constraint on camera_id. The detections_all view
+-- below restores the unified query surface without that cost.
+CREATE TABLE IF NOT EXISTS audio_detections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    channel INTEGER NOT NULL,
+    species TEXT,
+    common_name TEXT,
+    confidence REAL,
+    duration_seconds REAL,
+    band_rms_dbfs REAL,
+    spectral_flatness REAL,
+    peak_frequency_hz REAL,
+    clip_path TEXT,
+    metadata TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_audio_timestamp ON audio_detections(timestamp);
+CREATE INDEX IF NOT EXISTS idx_audio_species ON audio_detections(species);
+CREATE INDEX IF NOT EXISTS idx_audio_channel ON audio_detections(channel);
+
+-- Unified view across both modalities, so "what species were here today"
+-- is one query rather than two. source_id is the camera for video rows
+-- and the microphone channel for audio rows.
+CREATE VIEW IF NOT EXISTS detections_all AS
+    SELECT
+        'video'      AS modality,
+        id           AS id,
+        timestamp    AS timestamp,
+        camera_id    AS source_id,
+        class_name   AS class_name,
+        species      AS species,
+        common_name  AS common_name,
+        confidence   AS confidence,
+        clip_path    AS clip_path
+    FROM detections
+    UNION ALL
+    SELECT
+        'audio'      AS modality,
+        id           AS id,
+        timestamp    AS timestamp,
+        channel      AS source_id,
+        'bird'       AS class_name,
+        species      AS species,
+        common_name  AS common_name,
+        confidence   AS confidence,
+        clip_path    AS clip_path
+    FROM audio_detections;
 """
 
 
@@ -127,6 +183,151 @@ class DetectionDatabase:
         except sqlite3.Error as exc:
             logger.error("Failed to insert detection: %s", exc)
             raise
+
+    def insert_audio_detection(
+        self,
+        *,
+        timestamp: str,
+        channel: int,
+        species: str | None = None,
+        common_name: str | None = None,
+        confidence: float | None = None,
+        duration_seconds: float | None = None,
+        band_rms_dbfs: float | None = None,
+        spectral_flatness: float | None = None,
+        peak_frequency_hz: float | None = None,
+        clip_path: str | None = None,
+        metadata: dict | None = None,
+    ) -> int:
+        """Insert a bird song identification and return the new row ID.
+
+        The acoustic measurements are stored alongside the identification
+        so the activity gate can be retuned against real recordings later
+        rather than by guesswork.
+        """
+        metadata_json = json.dumps(metadata) if metadata is not None else None
+
+        # SQLite has no concept of infinity for REAL columns, and a silent
+        # channel legitimately measures as -inf dBFS. Store it as NULL.
+        band_rms = _finite_or_none(band_rms_dbfs)
+
+        try:
+            cursor = self._conn.execute(
+                """
+                INSERT INTO audio_detections (
+                    timestamp, channel, species, common_name, confidence,
+                    duration_seconds, band_rms_dbfs, spectral_flatness,
+                    peak_frequency_hz, clip_path, metadata
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    timestamp, channel, species, common_name, confidence,
+                    duration_seconds, band_rms, spectral_flatness,
+                    peak_frequency_hz, clip_path, metadata_json,
+                ),
+            )
+            self._conn.commit()
+            row_id: int = cursor.lastrowid  # type: ignore[assignment]
+            logger.debug("Inserted audio detection row %d", row_id)
+            return row_id
+        except sqlite3.Error as exc:
+            logger.error("Failed to insert audio detection: %s", exc)
+            raise
+
+    def get_audio_detections(
+        self,
+        since: str | None = None,
+        channel: int | None = None,
+        species: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """Query bird song identifications with optional filters.
+
+        Parameters
+        ----------
+        since : str or None
+            ISO-8601 timestamp lower bound (inclusive).
+        channel : int or None
+            Restrict to one microphone (0 is left, 1 is right).
+        species : str or None
+            Restrict to a single scientific name.
+        limit : int
+            Maximum number of rows to return (default 100).
+        """
+        clauses: list[str] = []
+        params: list[object] = []
+
+        if since is not None:
+            clauses.append("timestamp >= ?")
+            params.append(since)
+        if channel is not None:
+            clauses.append("channel = ?")
+            params.append(channel)
+        if species is not None:
+            clauses.append("species = ?")
+            params.append(species)
+
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        query = (
+            f"SELECT * FROM audio_detections{where} "
+            f"ORDER BY timestamp DESC LIMIT ?"
+        )
+        params.append(limit)
+
+        try:
+            rows = self._conn.execute(query, params).fetchall()
+        except sqlite3.Error as exc:
+            logger.error("Failed to query audio detections: %s", exc)
+            raise
+
+        return [_decode_metadata(dict(row)) for row in rows]
+
+    def get_all_detections(
+        self,
+        since: str | None = None,
+        modality: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """Query across both modalities via the detections_all view.
+
+        Parameters
+        ----------
+        since : str or None
+            ISO-8601 timestamp lower bound (inclusive).
+        modality : str or None
+            Restrict to "video" or "audio".
+        limit : int
+            Maximum number of rows to return (default 100).
+        """
+        if modality is not None and modality not in ("video", "audio"):
+            raise ValueError(
+                f"modality must be 'video', 'audio' or None, got {modality!r}"
+            )
+
+        clauses: list[str] = []
+        params: list[object] = []
+
+        if since is not None:
+            clauses.append("timestamp >= ?")
+            params.append(since)
+        if modality is not None:
+            clauses.append("modality = ?")
+            params.append(modality)
+
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        query = (
+            f"SELECT * FROM detections_all{where} "
+            f"ORDER BY timestamp DESC LIMIT ?"
+        )
+        params.append(limit)
+
+        try:
+            rows = self._conn.execute(query, params).fetchall()
+        except sqlite3.Error as exc:
+            logger.error("Failed to query unified detections: %s", exc)
+            raise
+
+        return [dict(row) for row in rows]
 
     def get_detections(
         self,
@@ -236,3 +437,22 @@ class DetectionDatabase:
         except sqlite3.Error as exc:
             logger.error("Error closing database: %s", exc)
             raise
+
+
+def _finite_or_none(value: float | None) -> float | None:
+    """Map non-finite floats to None so SQLite stores them as NULL."""
+    if value is None:
+        return None
+    if not math.isfinite(value):
+        return None
+    return value
+
+
+def _decode_metadata(record: dict) -> dict:
+    """Decode a row's JSON metadata column in place, tolerating bad data."""
+    if record.get("metadata") is not None:
+        try:
+            record["metadata"] = json.loads(record["metadata"])
+        except (json.JSONDecodeError, TypeError):
+            pass  # leave as raw string if it cannot be decoded
+    return record

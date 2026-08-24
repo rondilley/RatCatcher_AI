@@ -84,6 +84,62 @@ class AlertConfig:
 
 
 @dataclass(frozen=True)
+class AudioConfig:
+    """Dual SPH0645 I2S microphone capture and bird song identification.
+
+    The two microphones share one I2S bus and are separated by their SEL
+    pin, so the operating system presents them as a single stereo capture
+    device. ``channels`` is therefore 2 for one stereo device, not two
+    independent sources.
+    """
+
+    enabled: bool = False
+    # "auto", "alsa", or "file"
+    source_type: str = "auto"
+    # ALSA device name. "default" follows the system default card.
+    device: str = "default"
+    sample_rate: int = 48000
+    channels: int = 2
+    # Seconds of audio pulled from the device per read
+    block_seconds: float = 0.5
+    # For file source: path to a WAV file, and whether to loop it
+    file_path: str | None = None
+    file_loop: bool = False
+
+    # -- signal conditioning --
+    # High-pass corner removing the SPH0645 DC offset and wind rumble
+    highpass_hz: float = 150.0
+
+    # -- activity gate --
+    gate_enabled: bool = True
+    gate_band_low_hz: float = 1000.0
+    gate_band_high_hz: float = 10000.0
+    # How far above the tracked noise floor a sound must rise to trigger
+    gate_snr_margin_db: float = 2.0
+    # Hard minimum level, guarding against triggering on digital silence
+    gate_absolute_floor_dbfs: float = -85.0
+    gate_max_flatness: float = 0.6
+    # Seconds to suppress repeated detections on the same channel
+    cooldown_seconds: float = 3.0
+
+    # -- BirdNET identification --
+    model_path: str = "BirdNET_v2.4_audio-model.tflite"
+    labels_path: str = "BirdNET_v2.4_labels_en_us.txt"
+    min_confidence: float = 0.25
+    top_k: int = 3
+    num_threads: int = 2
+    # Analyse each microphone separately, or average them to mono first.
+    # Per-channel costs one inference per microphone but tells you which
+    # side of the feeder the bird was on.
+    per_channel: bool = True
+
+    # -- clip retention --
+    # Save a WAV alongside each identification
+    save_clips: bool = True
+    clip_dir: str = "audio"
+
+
+@dataclass(frozen=True)
 class MonitoringConfig:
     health_interval_seconds: int = 60
     temp_warning_c: float = 75.0
@@ -107,6 +163,7 @@ class Config:
         default_factory=ClassificationConfig
     )
     storage: StorageConfig = field(default_factory=StorageConfig)
+    audio: AudioConfig = field(default_factory=AudioConfig)
     alerts: AlertConfig = field(default_factory=AlertConfig)
     monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
 
@@ -125,6 +182,10 @@ class Config:
     @property
     def thumbnail_full_path(self) -> Path:
         return self.data_path / self.storage.thumbnail_dir
+
+    @property
+    def audio_clip_full_path(self) -> Path:
+        return self.data_path / self.audio.clip_dir
 
 
 def _coerce_tuple(value: Any, length: int = 2) -> tuple[int, ...]:
@@ -197,6 +258,7 @@ def load_config(config_path: str | Path | None = None) -> Config:
         detection=_build_section(DetectionConfig, raw.get("detection")),
         classification=_build_section(ClassificationConfig, raw.get("classification")),
         storage=_build_section(StorageConfig, raw.get("storage")),
+        audio=_build_section(AudioConfig, raw.get("audio")),
         alerts=_build_section(AlertConfig, raw.get("alerts")),
         monitoring=_build_section(MonitoringConfig, raw.get("monitoring")),
     )

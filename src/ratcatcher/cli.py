@@ -69,6 +69,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Detection backend override",
     )
 
+    audio_group = run_parser.add_mutually_exclusive_group()
+    audio_group.add_argument(
+        "--audio",
+        dest="audio",
+        action="store_true",
+        default=None,
+        help="Enable bird song detection from the I2S microphones",
+    )
+    audio_group.add_argument(
+        "--no-audio",
+        dest="audio",
+        action="store_false",
+        help="Disable bird song detection even if enabled in the config",
+    )
+
     stats_parser = subparsers.add_parser("stats", help="Show detection statistics")
     stats_parser.add_argument(
         "--last",
@@ -84,6 +99,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     subparsers.add_parser("health", help="Show system health status")
+
+    test_mic_parser = subparsers.add_parser(
+        "test-mic", help="Record from the I2S microphones and report levels"
+    )
+    test_mic_parser.add_argument(
+        "--seconds",
+        type=float,
+        default=5.0,
+        help="Recording duration in seconds (default: 5)",
+    )
+    test_mic_parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Write the recording to this WAV file",
+    )
+    test_mic_parser.add_argument(
+        "--identify",
+        action="store_true",
+        help="Run BirdNET on the recording and report any species heard",
+    )
 
     test_cam_parser = subparsers.add_parser("test-camera", help="Capture a test frame")
     test_cam_parser.add_argument(
@@ -168,9 +204,34 @@ def _cmd_run(args: argparse.Namespace) -> int:
     print(f"RatCatcher AI v{_get_version()}")
     print(f"Mode: {args.mode}")
 
+    if args.audio is not None:
+        from dataclasses import replace as dc_replace4
+        config = dc_replace4(
+            config,
+            audio=dc_replace4(config.audio, enabled=args.audio),
+        )
+
     from ratcatcher.pipeline.engine import PipelineEngine
 
     engine = PipelineEngine(config)
+
+    # The audio engine is deliberately independent: it owns its own
+    # threads and its own database handle, so a failure to open the
+    # microphones must not stop the cameras from running.
+    audio_engine = None
+    if config.audio.enabled:
+        from ratcatcher.pipeline.audio_engine import AudioEngine
+
+        audio_engine = AudioEngine(config)
+        try:
+            audio_engine.start()
+            print("Audio: bird song detection active")
+        except (RuntimeError, OSError) as exc:
+            print(f"WARNING: audio disabled -- {exc}", file=sys.stderr)
+            audio_engine = None
+    else:
+        print("Audio: disabled")
+
     try:
         engine.start(
             camera_ids=args.cameras,
@@ -182,9 +243,14 @@ def _cmd_run(args: argparse.Namespace) -> int:
         return 1
     except KeyboardInterrupt:
         engine.stop()
+    finally:
+        if audio_engine is not None:
+            audio_engine.stop()
 
     stats = engine.stats
     print(f"\nSession stats: {stats}")
+    if audio_engine is not None:
+        print(f"Audio stats:   {audio_engine.stats}")
     return 0
 
 
@@ -290,6 +356,160 @@ def _cmd_health(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_test_mic(args: argparse.Namespace) -> int:
+    """Record from the I2S microphones and report per-channel levels.
+
+    The audio counterpart of ``test-camera``. Its main job is answering
+    the first question after wiring the SPH0645s: is each microphone
+    actually producing signal, and are they on the channels expected?
+    """
+    import numpy as np
+
+    from ratcatcher.audio.capture import ArecordSource
+    from ratcatcher.audio.preprocess import (
+        DCBlocker,
+        peak_dbfs,
+        rms_dbfs,
+        split_channels,
+    )
+    from ratcatcher.config import load_config
+
+    try:
+        config = load_config()
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    _setup_logging(config.system.log_level)
+    audio_config = config.audio
+
+    devices = ArecordSource.list_capture_devices()
+    if not devices:
+        print("ERROR: no ALSA capture devices found.", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("The I2S microphones are not enabled yet. Run:", file=sys.stderr)
+        print("  sudo ./scripts/enable_i2s_mics.sh", file=sys.stderr)
+        print("then reboot and try again.", file=sys.stderr)
+        return 1
+
+    print("Capture devices:")
+    for device in devices:
+        print(f"  {device}")
+    print()
+
+    source = ArecordSource(
+        device=audio_config.device,
+        sample_rate=audio_config.sample_rate,
+        channels=audio_config.channels,
+    )
+
+    frames = int(audio_config.sample_rate * args.seconds)
+    print(
+        f"Recording {args.seconds:.1f} s from '{audio_config.device}' "
+        f"({audio_config.channels} channel(s) @ {audio_config.sample_rate} Hz)..."
+    )
+
+    try:
+        source.start()
+        ok, block = source.read(frames)
+    except RuntimeError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        source.stop()
+
+    if not ok or block is None:
+        print("ERROR: capture failed or returned no audio.", file=sys.stderr)
+        return 1
+
+    raw_offset = float(np.mean(block))
+    filtered = DCBlocker(
+        sample_rate=audio_config.sample_rate,
+        cutoff_hz=audio_config.highpass_hz,
+        channels=block.shape[1],
+    ).process(block)
+
+    print()
+    print(f"Captured {block.shape[0] / audio_config.sample_rate:.2f} s")
+    print(f"DC offset before filtering: {raw_offset:+.5f} (SPH0645 always has one)")
+    print()
+    print(f"  {'channel':<12} {'RMS':>10} {'peak':>10}   status")
+
+    channels = split_channels(filtered)
+    problems = 0
+    for index, signal in enumerate(channels):
+        rms = rms_dbfs(signal)
+        peak = peak_dbfs(signal)
+        side = {0: "left", 1: "right"}.get(index, f"ch{index}")
+
+        # A live SPH0645 always shows some self-noise. A channel pinned at
+        # digital silence means SEL, DOUT or power is not connected.
+        if peak == float("-inf") or rms < -90.0:
+            status = "SILENT -- check wiring (SEL, DOUT, power)"
+            problems += 1
+        elif peak > -1.0:
+            status = "CLIPPING -- sound source is too loud"
+            problems += 1
+        else:
+            status = "OK"
+
+        rms_text = "-inf" if rms == float("-inf") else f"{rms:.1f}"
+        peak_text = "-inf" if peak == float("-inf") else f"{peak:.1f}"
+        print(f"  {index} ({side:<5}) {rms_text:>10} {peak_text:>10}   {status}")
+
+    if len(channels) >= 2:
+        difference = abs(rms_dbfs(channels[0]) - rms_dbfs(channels[1]))
+        if difference > 20.0:
+            print()
+            print(
+                f"WARNING: channels differ by {difference:.0f} dB. If both mics "
+                f"hear the same scene, check that one SEL is tied to GND and "
+                f"the other to 3.3V."
+            )
+
+    if args.output:
+        from ratcatcher.audio.clip_writer import write_wav
+
+        try:
+            written = write_wav(args.output, filtered, audio_config.sample_rate)
+            print(f"\nWrote {written}")
+        except (OSError, ValueError) as exc:
+            print(f"ERROR: could not write {args.output}: {exc}", file=sys.stderr)
+            return 1
+
+    if args.identify:
+        from ratcatcher.audio.birdnet import BirdNetClassifier
+
+        print()
+        try:
+            classifier = BirdNetClassifier(
+                model_path=Path("models") / audio_config.model_path,
+                labels_path=Path("models") / audio_config.labels_path,
+                min_confidence=audio_config.min_confidence,
+                top_k=audio_config.top_k,
+                num_threads=audio_config.num_threads,
+            )
+        except (ImportError, FileNotFoundError, ValueError, RuntimeError) as exc:
+            print(f"ERROR: BirdNET unavailable -- {exc}", file=sys.stderr)
+            return 1
+
+        print("BirdNET identification:")
+        found = False
+        for index, signal in enumerate(channels):
+            for start in range(0, max(1, signal.size), classifier.window_samples):
+                window = signal[start : start + classifier.window_samples]
+                if window.size < classifier.window_samples // 2:
+                    break
+                for detection in classifier.identify(window, channel=index):
+                    offset = start / audio_config.sample_rate
+                    print(f"  ch{index} t={offset:5.1f}s  {detection}")
+                    found = True
+        if not found:
+            print("  (nothing identified above the confidence threshold)")
+
+    return 0 if problems == 0 else 1
+
+
 def _cmd_test_camera(args: argparse.Namespace) -> int:
     """Capture a test frame from a camera."""
     from ratcatcher.config import load_config, CameraConfig
@@ -347,6 +567,7 @@ def main(argv: list[str] | None = None) -> int:
         "stats": _cmd_stats,
         "health": _cmd_health,
         "test-camera": _cmd_test_camera,
+        "test-mic": _cmd_test_mic,
     }
 
     handler = commands.get(args.command)

@@ -100,6 +100,68 @@ storage:
   # FFmpeg encoding preset (ultrafast, fast, medium)
   ffmpeg_preset: "fast"
 
+audio:
+  # Dual Adafruit SPH0645 I2S MEMS microphones for bird song detection.
+  #
+  # Both mics share one I2S bus and are separated by their SEL pin, so the
+  # OS presents them as ONE stereo capture device: channel 0 is the left
+  # mic (SEL to GND), channel 1 the right (SEL to 3.3V). Enabling this
+  # requires: sudo ./scripts/enable_i2s_mics.sh followed by a reboot.
+  enabled: false
+
+  # "auto" (alsa, falling back to file), "alsa", or "file"
+  source_type: "auto"
+  # ALSA device name; "default" follows the system default card
+  device: "default"
+  sample_rate: 48000
+  channels: 2
+  # Seconds of audio read from the device per block
+  block_seconds: 0.5
+  # For file source: WAV path used for development and testing
+  file_path: null
+  file_loop: false
+
+  # High-pass corner removing the SPH0645 DC offset and wind rumble.
+  # Well below the fundamental of any North American songbird.
+  highpass_hz: 150.0
+
+  # Activity gate: the audio equivalent of the motion pre-filter. Keeps
+  # BirdNET inference off windows containing only silence or noise.
+  gate_enabled: true
+  gate_band_low_hz: 1000.0
+  gate_band_high_hz: 10000.0
+  # How far above the tracked ambient noise floor a sound must rise.
+  # Measured against a field soundscape with BirdNET as ground truth:
+  # 2 dB keeps 100% of windows containing a real bird, 4 dB loses 14%,
+  # 6 dB loses 48%. In a dawn chorus the birds ARE the ambient sound, so
+  # a large margin rejects the subject. The gate still turns away silence
+  # and steady rain, which is where it actually saves work.
+  gate_snr_margin_db: 2.0
+  # Hard floor guarding against triggering on digital silence
+  gate_absolute_floor_dbfs: -85.0
+  # Maximum spectral flatness: 0 is a pure tone, 1 is white noise.
+  # Song is tonal and measures 0.01-0.06 in the field; rain scores high.
+  gate_max_flatness: 0.6
+  # Seconds to suppress repeated detections on the same channel
+  cooldown_seconds: 3.0
+
+  # BirdNET model. Weights are CC BY-NC-SA and are NOT in this repo;
+  # fetch them with ./scripts/download_models.sh
+  model_path: "BirdNET_v2.4_audio-model.tflite"
+  labels_path: "BirdNET_v2.4_labels_en_us.txt"
+  min_confidence: 0.25
+  top_k: 3
+  # Interpreter threads. The Pi 5 has 4 cores and the camera pipeline
+  # needs them too, so 2 leaves headroom.
+  num_threads: 2
+  # Identify each mic separately (costs one inference per mic, but tells
+  # you which side of the feeder the bird was on) or average to mono.
+  per_channel: true
+
+  # Save a WAV clip alongside each identification
+  save_clips: true
+  clip_dir: "audio"
+
 alerts:
   enabled: false
   # Alert on these detection classes

@@ -99,6 +99,65 @@ else
     fi
 fi
 
+# ---------------------------------------------------------------------------
+# BirdNET -- bird song identification from the I2S microphones
+# ---------------------------------------------------------------------------
+#
+# LICENSING: the BirdNET model weights are released under CC BY-NC-SA 4.0
+# (Attribution, NonCommercial, ShareAlike). They are downloaded at runtime
+# rather than committed, so this repository carries no non-commercially
+# licensed binaries. Review the terms before any commercial deployment:
+#   https://creativecommons.org/licenses/by-nc-sa/4.0/
+#
+# The archive is hosted on Zenodo, which serves stable direct URLs. The
+# project documentation also links Google Drive copies, but those need an
+# interactive confirmation token for large files and cannot be scripted.
+#
+# The zip contains audio-model.tflite (the acoustic classifier, 3-second
+# windows of 48 kHz audio to 6522 species), meta-model.tflite (a
+# location and date prior, unused here), and labels for 26 languages.
+
+BIRDNET_MODEL="${MODELS_DIR}/BirdNET_v2.4_audio-model.tflite"
+BIRDNET_LABELS="${MODELS_DIR}/BirdNET_v2.4_labels_en_us.txt"
+BIRDNET_ZIP_URL="https://zenodo.org/records/15050749/files/BirdNET_v2.4_tflite.zip"
+
+echo ""
+echo "--- BirdNET (bird song identification) ---"
+
+if [ -f "${BIRDNET_MODEL}" ] && [ -f "${BIRDNET_LABELS}" ]; then
+    echo "SKIP: BirdNET model and labels already present."
+elif ! command -v unzip >/dev/null 2>&1; then
+    echo "SKIP: unzip is required. Install it with: sudo apt-get install unzip"
+else
+    BIRDNET_TMP="$(mktemp -d)"
+    trap 'rm -rf "${BIRDNET_TMP}"' EXIT
+
+    echo "Downloading BirdNET v2.4 TFLite archive (about 73 MB)..."
+    if curl -fsSL --max-time 900 -o "${BIRDNET_TMP}/birdnet.zip" "${BIRDNET_ZIP_URL}"; then
+        if unzip -q -o "${BIRDNET_TMP}/birdnet.zip" \
+                "audio-model.tflite" "labels/en_us.txt" -d "${BIRDNET_TMP}"; then
+            # TFLite files carry the "TFL3" identifier at byte offset 4.
+            if dd if="${BIRDNET_TMP}/audio-model.tflite" bs=1 skip=4 count=4 \
+                    2>/dev/null | grep -q "TFL3"; then
+                mv "${BIRDNET_TMP}/audio-model.tflite" "${BIRDNET_MODEL}"
+                mv "${BIRDNET_TMP}/labels/en_us.txt" "${BIRDNET_LABELS}"
+                echo "Installed ${BIRDNET_MODEL} ($(du -h "${BIRDNET_MODEL}" | cut -f1))"
+                echo "Installed ${BIRDNET_LABELS} ($(wc -l < "${BIRDNET_LABELS}") species)"
+            else
+                echo "ERROR: extracted file is not a valid TFLite model. Skipping."
+            fi
+        else
+            echo "ERROR: could not extract the BirdNET archive. Skipping."
+        fi
+    else
+        echo "SKIP: could not download ${BIRDNET_ZIP_URL}"
+        echo "Model listings: https://birdnet-team.github.io/BirdNET-Analyzer"
+    fi
+
+    rm -rf "${BIRDNET_TMP}"
+    trap - EXIT
+fi
+
 echo ""
 echo "=== Model Download Complete ==="
 echo ""
