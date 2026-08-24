@@ -21,7 +21,6 @@ rpi = [
 ]
 dev = [
     "pytest>=7.0",
-    "opencv-python>=4.8",
 ]
 cpu = [
     "ncnn>=1.0.20230816",

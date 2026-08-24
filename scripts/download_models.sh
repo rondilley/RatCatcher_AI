@@ -62,17 +62,40 @@ YOLO_HEF="${MODELS_DIR}/yolov8n.hef"
 if [ -f "${YOLO_HEF}" ]; then
     echo "[SKIP] YOLOv8n HEF already exists"
 else
-    echo "[3/3] Hailo HEF conversion..."
-    if command -v hailo &>/dev/null; then
-        echo "Hailo SDK found. Converting to HEF..."
-        echo "This requires the Hailo Dataflow Compiler (DFC)."
-        echo "Run on a machine with the full Hailo SDK installed:"
-        echo "  hailo optimize ${YOLO_ONNX} --hw-arch hailo8l"
-        echo "  hailo compile --hw-arch hailo8l -o ${YOLO_HEF}"
+    echo "[3/3] Fetching Hailo HEF..."
+    # Stock YOLOv8n does NOT need the Hailo Dataflow Compiler -- Hailo
+    # publishes prebuilt HEFs in the Model Zoo.  The DFC is only required
+    # for a custom-trained model (see training/export_model.py).
+    #
+    # HEFs are compiled per architecture.  A hailo8l HEF runs on Hailo-8
+    # hardware but only uses half the compute, so match the real device.
+    HAILO_PCI="$(lspci 2>/dev/null | grep -i 'hailo' || true)"
+    if echo "${HAILO_PCI}" | grep -qi 'hailo-8l'; then
+        HAILO_ARCH="hailo8l"
     else
-        echo "SKIP: Hailo SDK not found."
-        echo "HEF conversion requires the Hailo Dataflow Compiler."
-        echo "See: https://hailo.ai/developer-zone/"
+        HAILO_ARCH="hailo8"
+    fi
+
+    # Model Zoo v2.16.0 pairs with HailoRT 4.23 (the version in the
+    # Raspberry Pi apt archive).  Bump both together.
+    MODELZOO_VER="v2.16.0"
+    HEF_URL="https://hailo-model-zoo.s3.eu-west-2.amazonaws.com/ModelZoo/Compiled/${MODELZOO_VER}/${HAILO_ARCH}/yolov8n.hef"
+
+    echo "Architecture: ${HAILO_ARCH} (Model Zoo ${MODELZOO_VER})"
+    if curl -fsSL --max-time 300 -o "${YOLO_HEF}.tmp" "${HEF_URL}"; then
+        # HEF files start with the magic bytes \x01HEF.
+        if head -c 4 "${YOLO_HEF}.tmp" | grep -q "HEF"; then
+            mv "${YOLO_HEF}.tmp" "${YOLO_HEF}"
+            echo "Downloaded ${YOLO_HEF} ($(du -h "${YOLO_HEF}" | cut -f1))"
+        else
+            rm -f "${YOLO_HEF}.tmp"
+            echo "ERROR: downloaded file is not a valid HEF. Skipping."
+        fi
+    else
+        rm -f "${YOLO_HEF}.tmp"
+        echo "SKIP: could not download ${HEF_URL}"
+        echo "For a custom-trained model you need the Hailo Dataflow"
+        echo "Compiler -- see: https://hailo.ai/developer-zone/"
     fi
 fi
 
