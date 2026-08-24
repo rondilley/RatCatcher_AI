@@ -1,11 +1,18 @@
 """Tests for audio capture and WAV clip writing.
 
 Real WAV files written to real temporary directories, matching the
-project's no-test-doubles policy. The ALSA path cannot be exercised
-without the I2S hardware attached, so what is tested here is everything
-that does not need it: the PCM conversion the SPH0645 depends on, the
-file source used for development, and the round trip through the clip
-writer.
+project's no-test-doubles policy.
+
+The live ALSA path is exercised against ALSA's "null" PCM, which
+supports capture without any hardware. That covers the subprocess
+handling, S32_LE format negotiation, byte parsing and shutdown --
+everything in the capture path except the microphones themselves.
+
+What still cannot be tested here, and needs the I2S overlay enabled and
+the Pi rebooted: whether the googlevoicehat overlay binds on this
+kernel, whether the SPH0645 really is left-justified in its 32-bit slot
+as raw_to_float32 assumes, and whether the SEL wiring puts one mic on
+each channel.
 """
 
 from __future__ import annotations
@@ -195,6 +202,67 @@ class TestArecordSource:
     def test_non_positive_read_is_rejected(self):
         with pytest.raises(ValueError, match="num_frames"):
             ArecordSource().read(0)
+
+    def test_unknown_device_raises_rather_than_hanging(self):
+        """A wrong device name must surface the ALSA error immediately."""
+        if not ArecordSource.is_available():
+            pytest.skip("arecord not installed")
+        with pytest.raises(RuntimeError, match="arecord"):
+            ArecordSource(device="ratcatcher_no_such_device").start()
+
+    def test_capture_against_the_alsa_null_device(self):
+        """Exercises the real subprocess, format negotiation and parsing.
+
+        ALSA's 'null' PCM supports capture without any hardware, so this
+        covers everything in the live path except the microphones
+        themselves.
+        """
+        if not ArecordSource.is_available():
+            pytest.skip("arecord not installed")
+
+        source = ArecordSource(device="null", sample_rate=SAMPLE_RATE, channels=2)
+        try:
+            source.start()
+            ok, block = source.read(4096)
+        finally:
+            source.stop()
+
+        assert ok
+        assert block.shape == (4096, 2)
+        assert block.dtype == np.float32
+        assert np.all(np.isfinite(block))
+        assert not source.is_running
+
+    def test_stop_does_not_stall_on_a_full_pipe(self):
+        """Regression: arecord blocks on a full stdout pipe and then
+        never reaches its SIGTERM handler. Closing the read end first
+        makes it exit on EPIPE. Without that fix this took 5 seconds and
+        needed SIGKILL on every single shutdown.
+        """
+        if not ArecordSource.is_available():
+            pytest.skip("arecord not installed")
+
+        import time
+
+        source = ArecordSource(device="null", sample_rate=SAMPLE_RATE, channels=2)
+        source.start()
+        source.read(4096)          # leave the pipe filling behind us
+
+        started = time.perf_counter()
+        source.stop()
+        assert time.perf_counter() - started < 2.0
+
+    def test_repeated_start_stop_cycles_are_clean(self):
+        if not ArecordSource.is_available():
+            pytest.skip("arecord not installed")
+
+        source = ArecordSource(device="null", sample_rate=SAMPLE_RATE, channels=2)
+        for _ in range(3):
+            source.start()
+            ok, _ = source.read(1024)
+            assert ok
+            source.stop()
+            assert not source.is_running
 
 
 class TestClipWriter:

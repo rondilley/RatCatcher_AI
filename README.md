@@ -1,8 +1,8 @@
 # RatCatcher AI
 
 Wildlife detection system for bird feeders. Identifies birds to Genus
-and Species, and detects pest animals (squirrels, rats, cats) in
-real-time using a two-stage neural network pipeline on a Raspberry Pi 5.
+and Species by sight *and* by song, and detects pest animals (squirrels,
+rats, cats) in real-time on a Raspberry Pi 5.
 
 ## How It Works
 
@@ -18,6 +18,20 @@ Camera -> Motion Filter -> YOLO Detection -> Species Classification -> SQLite + 
               (MOG2)       (Hailo NPU)        (TFLite, CPU)
 ```
 
+Two I2S microphones listen in parallel, identifying bird song with
+BirdNET. Audio is an **independent detector**, not a stage of the video
+pipeline: it has its own capture and inference threads and meets the
+video path only at the database. Song identification keeps working when
+the cameras or the NPU are unavailable, and vice versa.
+
+```
+I2S Mics -> DC Block -> Activity Gate -> BirdNET -> SQLite + WAV Clips
+  (x2)     (SPH0645)   (SNR + tonality)  (TFLite, CPU)
+```
+
+The `detections_all` SQL view unions both modalities behind a `modality`
+column, so "what species were here today" stays a single query.
+
 ## Hardware
 
 | Component | Model | Purpose |
@@ -25,24 +39,26 @@ Camera -> Motion Filter -> YOLO Detection -> Species Classification -> SQLite + 
 | Computer | Raspberry Pi 5 (4GB) | Main controller |
 | Cameras | 2x Arducam UC-517 B0270 | IMX477 12MP, IR-Cut for day/night |
 | AI Accelerator | Hailo-8L AI HAT+ (13 TOPS) | Real-time object detection |
+| Microphones | 2x Adafruit SPH0645 (I2S MEMS) | Bird song capture, shared bus |
 | Power | UPS HAT + solar panel | Outdoor uninterrupted power |
 | Enclosure | IP65 weatherproof | Outdoor deployment |
 
 ## Quick Start (Development)
 
-Develop on Windows or Linux. No RPi hardware needed.
+Development and production both run on the Raspberry Pi 5. The camera
+and audio layers fall back to file sources, so most work needs no
+attached hardware.
 
 ```bash
 # Clone and install
 git clone <repo-url> && cd RatCatcher_AI
-python -m venv .venv
-source .venv/bin/activate        # Linux/macOS
-# .\.venv\Scripts\Activate.ps1   # Windows PowerShell
+python3 -m venv venv
+source venv/bin/activate
 
-pip install -e ".[dev]"
+pip install -e ".[dev,audio]"
 
-# Run tests (51 tests)
-pytest tests/ -v
+# Run tests (182 tests, no test doubles -- real WAVs, real SQLite)
+venv/bin/pytest tests/ -v
 
 # Check system info
 ratcatcher health
@@ -63,7 +79,14 @@ sudo ./scripts/setup_rpi.sh
 # Install Hailo AI HAT+ drivers
 sudo ./scripts/install_hailo.sh
 
-# Download ML models
+# Enable the I2S microphones (edits config.txt; reboot required)
+sudo ./scripts/enable_i2s_mics.sh
+sudo reboot
+
+# Verify both microphones carry signal
+ratcatcher test-mic
+
+# Download ML models (includes BirdNET from Zenodo)
 ./scripts/download_models.sh
 
 # Copy config
@@ -90,9 +113,21 @@ ratcatcher stats --last 7d         # Last 7 days
 
 ratcatcher health                  # System health check
 
+ratcatcher run --audio             # Force bird song detection on
+ratcatcher run --no-audio          # Force it off, whatever the config says
+
 ratcatcher test-camera             # Capture and save a test frame
 ratcatcher test-camera --camera 1  # Test camera 1
+
+ratcatcher test-mic                # Record 5s, report per-channel levels
+ratcatcher test-mic --seconds 30   # Longer recording
+ratcatcher test-mic --output a.wav # Save the recording
+ratcatcher test-mic --identify     # Also run BirdNET on what was heard
 ```
+
+Note that `test-mic --identify` deliberately skips the activity gate and
+reports raw BirdNET output, so it will name species on room noise. The
+live pipeline gates first.
 
 ## ML Models
 
@@ -111,6 +146,19 @@ ratcatcher test-camera --camera 1  # Test camera 1
 - **Input:** 224x224 RGB
 - **Performance:** ~25-50ms per crop on RPi5 CPU
 
+### Bird Song Identification (Audio, independent)
+- **Model:** BirdNET v2.4 (TFLite FP32)
+- **File:** `models/BirdNET_v2.4_audio-model.tflite` (52 MB)
+- **Classes:** 6522, global coverage; includes non-bird labels (Dog, Engine, Human)
+- **Input:** 3-second windows of 48 kHz audio
+- **Performance:** 62 ms per window on RPi5 CPU -- about 48x realtime,
+  roughly 4% of one core for two channels running continuously
+
+**License note:** BirdNET's weights are **CC BY-NC-SA 4.0, not GPL-3.**
+They are downloaded from Zenodo by `scripts/download_models.sh` and are
+never committed to this repository. Review the terms before any
+commercial use.
+
 ## Project Structure
 
 ```
@@ -119,13 +167,14 @@ config/
   species.yaml              50 Western US bird species + 9 pest species
 
 src/ratcatcher/
-  cli.py                    CLI entry point (run/stats/health/test-camera)
+  cli.py                    CLI entry point (run/stats/health/test-mic/test-camera)
   config.py                 YAML config loading with frozen dataclasses
   camera/                   Camera abstraction (Picamera2, file, webcam)
   motion/                   MOG2 motion detection + ROI masking
   detection/                YOLO object detection (3 backends)
   classification/           MobileNet V2 species classification (TFLite)
-  pipeline/                 Threaded pipeline engine
+  audio/                    I2S capture, conditioning, activity gate, BirdNET
+  pipeline/                 Threaded engines (video and audio)
   storage/                  SQLite logging, FFmpeg clips, thumbnails
   monitoring/               System health + detection statistics
 
@@ -133,7 +182,7 @@ models/                     ML model files (.tflite, .onnx, .hef)
 training/                   CUDA training pipeline (download, train, export)
 scripts/                    RPi5 setup and model download scripts
 systemd/                    Systemd service for auto-start
-tests/                      51 tests (pytest)
+tests/                      182 tests (pytest, no test doubles)
 docs/                       Architecture and deployment docs
 ```
 
@@ -170,6 +219,10 @@ Key settings in `config/default.yaml`:
 - Species classification model path and minimum confidence
 - Clip recording pre/post seconds and disk retention
 - Alert classes and notification methods
+- Audio: ALSA device, activity gate thresholds, BirdNET confidence
+
+Bird song detection is **off by default** (`audio.enabled: false`). Turn
+it on once `ratcatcher test-mic` reports OK on both channels.
 
 ## 50 Target Species (Western US)
 
@@ -183,13 +236,24 @@ Squirrel, Norway Rat, Roof Rat, House Mouse, Raccoon, Opossum, Cat.
 
 ## Platform Support
 
-| Platform | Camera | Detection | Classification |
-|---|---|---|---|
-| RPi5 (production) | Picamera2 | Hailo-8L NPU | TFLite Runtime |
-| RPi5 (no Hailo) | Picamera2 | NCNN (CPU) | TFLite Runtime |
-| Windows (dev) | FileSource / Webcam | OpenCV DNN | TensorFlow Lite |
-| Linux (dev) | FileSource / Webcam | NCNN or OpenCV DNN | TFLite Runtime |
+| Platform | Camera | Detection | Classification | Audio |
+|---|---|---|---|---|
+| RPi5 (production) | Picamera2 | Hailo-8L NPU | ai-edge-litert | ALSA / I2S mics |
+| RPi5 (no Hailo) | Picamera2 | NCNN (CPU) | ai-edge-litert | ALSA / I2S mics |
+| Linux (dev) | FileSource / Webcam | NCNN or OpenCV DNN | ai-edge-litert | WAV file source |
+
+Factory patterns in the camera, detection, and audio layers auto-select
+a backend at startup, so an unavailable device degrades to a file source
+rather than failing.
+
+`tflite-runtime` publishes no wheels for Python 3.13, which current
+Raspberry Pi OS ships. `ai-edge-litert`, its maintained successor, is
+what the `audio` extra installs; both classifiers try `tflite_runtime`,
+`ai_edge_litert`, then `tensorflow` in order.
 
 ## License
 
-MIT
+GPL-3.0-or-later. See `LICENSE`.
+
+BirdNET model weights are **not** covered by that license -- they are
+CC BY-NC-SA 4.0 and are fetched at runtime rather than vendored.

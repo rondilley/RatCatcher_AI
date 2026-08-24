@@ -82,7 +82,7 @@ else
 # googlevoicehat-soundcard is the standard overlay for the SPH0645. It
 # loads snd-soc-googlevoicehat-codec and binds to the RP1 I2S controller
 # on the Pi 5. The card runs 48 kHz with 32-bit frames, which is what the
-# SPH0645 emits (24 data bits left-justified in a 32-bit slot) and also
+# SPH0645 emits (18 data bits left-justified in a 32-bit slot) and also
 # the sample rate BirdNET expects, so no resampling is needed.
 dtoverlay=googlevoicehat-soundcard
 OVERLAY_BLOCK

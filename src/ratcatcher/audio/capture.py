@@ -273,6 +273,20 @@ class ArecordSource:
         if process is None:
             return
 
+        # Close the read end BEFORE signalling. When the consumer stops
+        # reading, arecord blocks writing into a full stdout pipe and
+        # never reaches its SIGTERM handler: measured here, terminate()
+        # alone waits the full timeout and then needs SIGKILL, while
+        # closing the pipe first makes it exit immediately on EPIPE.
+        #
+        # This can race the capture thread mid-read, which surfaces as
+        # ValueError on a closed file. That is caught in read().
+        if process.stdout is not None:
+            try:
+                process.stdout.close()
+            except OSError:
+                pass
+
         process.terminate()
         try:
             process.wait(timeout=5)
@@ -284,9 +298,11 @@ class ArecordSource:
             except subprocess.TimeoutExpired:
                 logger.error("arecord could not be killed")
 
-        for stream in (process.stdout, process.stderr):
-            if stream is not None:
-                stream.close()
+        if process.stderr is not None:
+            try:
+                process.stderr.close()
+            except OSError:
+                pass
 
         logger.info("Audio capture stopped")
 

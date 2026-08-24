@@ -7,6 +7,12 @@ outdoor bird feeder monitoring. It runs on a Raspberry Pi 5 with two
 cameras and a Hailo-8L AI accelerator, detecting pest animals and
 identifying bird species by Genus and Species.
 
+It has two independent detectors: a **video pipeline** (motion -> object
+detection -> species classification) and an **audio pipeline** (activity
+gate -> song identification). They share the SQLite database and nothing
+else -- no queues, no locks, no shared state -- so either keeps working
+when the other's hardware is unavailable.
+
 ## Pipeline Architecture
 
 The system uses a three-stage pipeline with motion pre-filtering:
@@ -98,6 +104,83 @@ full-resolution frame and classifies it.
 The taxonomy maps model output indices to species info (Genus, Species,
 Common Name, Family). Species not in the taxonomy appear as "unknown_NNN".
 
+## Audio Pipeline (Independent Detector)
+
+```
++------------------+     +------------------+     +-------------------+
+| I2S Capture      |     | Conditioning     |     | Activity Gate     |
+| 2x SPH0645       | --> | DC block, split  | --> | SNR vs noise floor|
+| arecord, 48 kHz  |     | 150 Hz highpass  |     | + spectral flatness|
++------------------+     +------------------+     +-------------------+
+                                                          |
+                                                   [sound present]
+                                                          |
+                                                +---------v---------+
+                                                | BirdNET v2.4      |
+                                                | TFLite FP32, CPU  |
+                                                | 62 ms per window  |
+                                                +-------------------+
+                                                          |
+                                                +---------v---------+
+                                                | Log + WAV clip    |
+                                                | audio_detections  |
+                                                +-------------------+
+```
+
+### Capture
+
+Two Adafruit SPH0645 I2S MEMS microphones share one I2S bus, separated
+by their SEL pin, so ALSA presents them as a single stereo device:
+channel 0 is the left mic (SEL to GND), channel 1 the right (SEL to
+3V3). `ArecordSource` runs `arecord` as a subprocess and parses S32_LE
+frames; `WavFileSource` substitutes a recording for development.
+
+The `AudioSource` protocol exposes `is_realtime`, and the consumer picks
+its backpressure policy from it. A live device must drop windows when
+the consumer falls behind, because blocking the reader stalls the sound
+card into ALSA overruns. A file must block instead, because it delivers
+far faster than realtime and dropping silently discards the recording.
+The property belongs on the producer because only the producer knows
+whether falling behind is recoverable.
+
+### Conditioning
+
+The SPH0645 has no output coupling capacitor, so every sample carries a
+large constant bias -- measured at roughly -0.044 full-scale on this
+build -- that would otherwise dominate every energy measurement
+downstream. DC removal is vectorised over the block rather than looped
+per sample. Data arrives as 18 bits left-justified in a 32-bit slot.
+
+### Activity Gate
+
+The audio analogue of the motion pre-filter, but tuned far more
+permissively, because the economics are different. Motion detection
+guards a ~28 ms NPU inference and skips most frames. The gate guards a
+62 ms CPU inference that costs about 4% of one core for two channels
+running continuously, so there is little to save by rejecting a window
+and everything to lose by rejecting a real bird.
+
+Gating is per channel (the two mics have different ambients) and
+frame-based rather than whole-window: whole-window flatness rejected
+real warbles. Measured against a field soundscape with BirdNET output as
+ground truth, a 2 dB SNR margin keeps 100% of windows containing a real
+bird, 4 dB loses 14%, and 6 dB loses 48%. The gate earns its keep on
+quiet nights and in steady rain, not in a dawn chorus -- where there is
+no quiet baseline to measure against, because the birds *are* the
+ambient sound.
+
+### Identification
+
+BirdNET v2.4, TFLite FP32, 52 MB, on CPU. The classifier reads its
+window length and class count from the model file at load time rather
+than hardcoding them, matching how the detection backends auto-detect
+custom versus COCO models.
+
+Coverage is global (6522 classes) and includes non-bird labels (Engine,
+Dog, Human). It is not restricted to the ~50 Western US species in
+`config/species.yaml`, and BirdNET's location/date meta-model, which
+would narrow candidates by geography and season, is not used.
+
 ## Threading Model
 
 ```
@@ -124,6 +207,26 @@ under load while maintaining real-time responsiveness.
 Graceful shutdown uses a sentinel object pattern: the main thread puts
 a sentinel on each queue, and worker threads exit when they dequeue it.
 
+The audio engine runs its own two threads alongside, sharing nothing
+with the above except the database:
+
+```
+I2S stereo --> audio-capture thread (DC block, accumulate 3 s windows)
+                            |
+                      window_queue
+                            |
+               audio-analysis thread (gate per channel -> BirdNET)
+                            |
+                SQLite audio_detections + WAV clip
+```
+
+Shutting down `arecord` needs one ordering detail: the read end of its
+stdout pipe must be closed *before* signalling. A stopped consumer
+leaves arecord blocked writing into a full pipe, where it never reaches
+its SIGTERM handler -- `terminate()` alone waits the full timeout and
+then needs SIGKILL. Closing the pipe first gives it EPIPE and it exits
+immediately.
+
 ## Data Storage
 
 ### SQLite Database
@@ -142,6 +245,48 @@ detections (
 
 Indexed on timestamp, species, and camera_id. The metadata column
 stores JSON (e.g., top-K classification results).
+
+Audio identifications live in a separate table:
+
+```sql
+audio_detections (
+    id, timestamp, channel,
+    species, common_name, confidence,
+    duration_seconds,
+    band_rms_dbfs, spectral_flatness, peak_frequency_hz,
+    clip_path, metadata
+)
+```
+
+Indexed on timestamp, species, and channel. They are kept apart from
+`detections` rather than merged: an audio event has no frame, no
+bounding box and no camera, while it does have a channel, a duration and
+acoustic measurements. One combined table would be a wide row that is
+mostly NULL whichever modality wrote it, and would force relaxing the
+NOT NULL constraint on `camera_id`.
+
+A view restores the unified query surface without that cost:
+
+```sql
+CREATE VIEW detections_all AS
+    SELECT 'video' AS modality, id, timestamp, camera_id AS source_id,
+           class_name, species, common_name, confidence, clip_path
+    FROM detections
+  UNION ALL
+    SELECT 'audio' AS modality, id, timestamp, channel AS source_id,
+           'bird' AS class_name, species, common_name, confidence, clip_path
+    FROM audio_detections;
+```
+
+`source_id` is the camera for video rows and the microphone channel for
+audio rows. Note that the two modalities are logged independently and
+are **not** correlated: a bird seen and heard at the same moment
+produces two unlinked rows.
+
+### Audio Clips
+
+WAV, written with the Python standard library rather than FFmpeg, so
+the audio path carries no external encoder dependency.
 
 ### Video Clips
 
@@ -198,7 +343,14 @@ backend="ncnn" -> NCNNDetector (requires ncnn Python package)
 backend="opencv_dnn" -> OpenCVDetector (always available)
 ```
 
-Both factories use lazy imports so unavailable backends don't cause
+### Audio Factory (audio/factory.py)
+```
+source_type="auto" -> try ArecordSource (ALSA) -> fall back to WavFileSource
+source_type="alsa" -> ArecordSource (requires arecord and an I2S device)
+source_type="file" -> WavFileSource (16/24/32-bit WAV)
+```
+
+All three factories use lazy imports so unavailable backends don't cause
 import errors.
 
 ## Training Pipeline (Desktop CUDA)
@@ -252,11 +404,15 @@ class scores), COCO remapping is skipped.
 | Python + OpenCV + Picamera2 | ~300 MB |
 | YOLO model (Hailo/NCNN) | ~200 MB |
 | Species classifier (TFLite INT8) | ~50 MB |
+| BirdNET (TFLite FP32, 52 MB weights) | ~156 MB (measured) |
 | Frame buffers (2 cameras) | ~200 MB |
+| Audio window buffers (2 channels) | ~10 MB |
 | SQLite + Python overhead | ~150 MB |
-| **Total** | **~1.2 GB** |
+| **Total** | **~1.4 GB** |
 
-Headroom: ~2.8 GB free on a 4 GB system running headless.
+Headroom: ~2.6 GB free on a 4 GB system running headless. BirdNET is the
+single largest model in the system by file size -- it is FP32 where the
+two vision models are quantized.
 
 ## Deployment
 
