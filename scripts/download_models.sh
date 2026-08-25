@@ -69,11 +69,27 @@ else
     #
     # HEFs are compiled per architecture.  A hailo8l HEF runs on Hailo-8
     # hardware but only uses half the compute, so match the real device.
-    HAILO_PCI="$(lspci 2>/dev/null | grep -i 'hailo' || true)"
-    if echo "${HAILO_PCI}" | grep -qi 'hailo-8l'; then
+    #
+    # Ask the firmware, not the PCIe ID.  lspci reports BOTH parts as
+    # "Hailo-8 AI Processor" -- there is no "hailo-8l" string to grep for,
+    # so the earlier lspci test never matched and this always fetched the
+    # hailo8 build.  On a real Hailo-8L that HEF fails to load outright.
+    # Requires the driver to be up; if it is not, fall back to hailo8l,
+    # which is the safe direction (a hailo8l HEF runs on a Hailo-8, but a
+    # hailo8 HEF will not run on a Hailo-8L).
+    HAILO_ARCH=""
+    if command -v hailortcli &>/dev/null; then
+        HAILO_ID="$(hailortcli fw-control identify 2>/dev/null || true)"
+        case "$(echo "${HAILO_ID}" | grep -i 'Device Architecture')" in
+            *HAILO8L*) HAILO_ARCH="hailo8l" ;;
+            *HAILO8*)  HAILO_ARCH="hailo8" ;;
+        esac
+    fi
+    if [ -z "${HAILO_ARCH}" ]; then
         HAILO_ARCH="hailo8l"
-    else
-        HAILO_ARCH="hailo8"
+        echo "WARNING: could not query the Hailo device architecture."
+        echo "         Is the driver loaded? Check: hailortcli fw-control identify"
+        echo "         Defaulting to ${HAILO_ARCH}, which runs on either part."
     fi
 
     # Model Zoo v2.16.0 pairs with HailoRT 4.23 (the version in the

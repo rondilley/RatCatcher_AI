@@ -26,6 +26,11 @@ models/*.onnx
 models/*.pt
 models/*.bin
 models/*.weights
+# Hailo INT8 calibration set -- hundreds of MB of raw uint8 image data,
+# rebuildable from the training images with training/build_calibration_set.py
+models/*.npy
+# Hailo DFC intermediates (translated network + quantized params)
+models/*.har
 # BirdNET labels ship with the CC BY-NC-SA model package and are
 # downloaded by scripts/download_models.sh, not committed.
 models/BirdNET_*

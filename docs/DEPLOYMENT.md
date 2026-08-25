@@ -9,7 +9,7 @@
 | Raspberry Pi 5 (4GB) | | 8GB also works |
 | Arducam UC-517 B0270 (x2) | B0270 | IR-Cut variant for day/night |
 | Hailo-8L AI HAT+ | SC1166 | 13 TOPS, sits on GPIO header |
-| Adafruit SPH0645 I2S mic (x2) | | MEMS breakout, shared I2S bus |
+| Adafruit I2S MEMS Microphone Breakout (x2) | 3421 | SPH0645LM4H, shared I2S bus |
 | UPS HAT | | Model-specific, see below |
 | MicroSD 64GB+ | | A2 rated preferred |
 | 22-pin FFC ribbon cables (x2) | | RPi5 uses 22-pin, not 15-pin |
@@ -323,16 +323,97 @@ grep -i "imx477\|camera" /boot/firmware/config.txt
 
 ### Hailo not responding
 
+Work outward from the hardware. The application log will not tell you
+anything useful if the OS cannot see the device -- and note that the
+`HAILO_STREAM_ABORT` lines that fill `hailort.log` are what a normal
+shutdown writes, not an error.
+
 ```bash
-# Check PCIe device
-lspci | grep Hailo
+# 1. Is the hardware on the bus at all?
+lspci | grep -i hailo
+#    No output -> the HAT+ is unseated or the PCIe ribbon is reversed.
 
-# Check driver
-dmesg | grep hailo
+# 2. Is the driver loaded?
+lsmod | grep hailo_pci
 
-# Re-identify
+# 3. Is there a device node?
+ls -l /dev/hailo0
+
+# 4. Can the runtime talk to it?
 hailortcli fw-control identify
 ```
+
+**If step 1 succeeds but steps 2-4 fail, a kernel upgrade has almost
+certainly orphaned the driver.** Confirm by comparing the running kernel
+against where the module actually lives:
+
+```bash
+uname -r
+find /lib/modules -name 'hailo_pci.ko*'
+```
+
+If the paths name different kernel versions, that is the problem.
+`hailort-pcie-driver` depends on `build-essential`, not `dkms`; without
+dkms its postinst compiles a one-off module for whichever kernel was
+running at install time, and the next kernel upgrade silently disables
+the NPU. Repair it, and make the rebuild automatic from now on:
+
+```bash
+sudo ./scripts/fix_hailo_driver.sh
+```
+
+That installs `dkms`, reinstalls the driver so it registers in the DKMS
+tree, reloads the module, and verifies each step. It does not need a
+reboot.
+
+Until the NPU is back, `backend: "auto"` falls back to the CPU and logs:
+
+```
+WARNING Auto-detect: Hailo NPU unavailable, falling back to CPU -- ...
+```
+
+Detection keeps working at roughly 5 FPS per camera instead of 35. If you
+see that line in the journal, the NPU is not being used.
+
+### Compiling the custom detector for the NPU
+
+The stock `yolov8n.hef` from the Model Zoo is COCO-80: it has no squirrel
+and no rat class, so on it the detector can only ever report bird and
+cat. The custom 5-class model has to be compiled to a HEF, and **that
+cannot be done on the Pi** -- the Hailo Dataflow Compiler is an x86-64
+Linux wheel (Python 3.8-3.11) with no aarch64 build.
+
+On an x86-64 Ubuntu 20.04/22.04 machine:
+
+```bash
+# 1. Get the DFC (free account) from
+#    https://hailo.ai/developer-zone/software-downloads/
+#    Match the DFC major version to the HailoRT on the Pi (4.23).
+python3 -m venv dfc-venv
+./dfc-venv/bin/pip install hailo_dataflow_compiler-*.whl
+
+# 2. Clone this repo, then copy over the two gitignored inputs.
+scp pi:RatCatcher_AI/models/ratcatcher_best.onnx models/
+rsync -a pi:RatCatcher_AI/datasets/ datasets/     # or: python training/download_data.py
+
+# 3. Build. Use the architecture reported by
+#    'hailortcli fw-control identify' on the Pi -- a hailo8l HEF runs on
+#    a Hailo-8, but a hailo8 HEF will NOT load on a Hailo-8L.
+PYTHON=./dfc-venv/bin/python HAILO_ARCH=hailo8l ./scripts/build_hef.sh
+```
+
+Copy the result back and confirm it is the custom model, not COCO:
+
+```bash
+scp models/ratcatcher_best.hef pi:RatCatcher_AI/models/
+
+# On the Pi -- this must say 5 classes, not 80:
+hailortcli parse-hef models/ratcatcher_best.hef
+```
+
+No config change is needed. `config/default.yaml` already names
+`ratcatcher_best.onnx`, and the factory swaps the suffix for `.hef` on
+the Hailo path, so the NPU is picked up on the next restart.
 
 ### Microphones silent or dead
 

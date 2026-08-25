@@ -73,23 +73,37 @@ def _auto_select(
     errors: list[str] = []
 
     # --- Hailo ---
+    # RuntimeError is caught alongside the import/file errors because
+    # HailoDetector wraps every device-level failure in one: the NPU is
+    # absent, already claimed by another process, or -- the case seen in
+    # the field on 2026-08-24 -- its kernel module did not survive a
+    # kernel upgrade, leaving no /dev/hailo0 for libhailort to open.
+    # Under "auto" that must degrade to a CPU backend, not take the whole
+    # pipeline down.  An explicit backend: "hailo" still fails hard, since
+    # there the caller asked for the NPU specifically.
     try:
         return _make_hailo(config, model_base)
-    except (ImportError, FileNotFoundError) as exc:
+    except (ImportError, FileNotFoundError, RuntimeError) as exc:
         errors.append(f"hailo: {exc}")
-        logger.debug("Auto-detect: Hailo unavailable -- %s", exc)
+        # Logged at warning, not debug: silently running detection on the
+        # CPU at a fraction of the frame rate is exactly the kind of
+        # degradation that should be visible in the journal.
+        logger.warning(
+            "Auto-detect: Hailo NPU unavailable, falling back to CPU -- %s",
+            exc,
+        )
 
     # --- NCNN ---
     try:
         return _make_ncnn(config, model_base)
-    except (ImportError, FileNotFoundError) as exc:
+    except (ImportError, FileNotFoundError, RuntimeError) as exc:
         errors.append(f"ncnn: {exc}")
         logger.debug("Auto-detect: NCNN unavailable -- %s", exc)
 
     # --- OpenCV DNN (always available if opencv is installed) ---
     try:
         return _make_opencv(config, model_base)
-    except (ImportError, FileNotFoundError) as exc:
+    except (ImportError, FileNotFoundError, RuntimeError) as exc:
         errors.append(f"opencv_dnn: {exc}")
         logger.debug("Auto-detect: OpenCV DNN unavailable -- %s", exc)
 

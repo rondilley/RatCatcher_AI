@@ -39,7 +39,7 @@ column, so "what species were here today" stays a single query.
 | Computer | Raspberry Pi 5 (4GB) | Main controller |
 | Cameras | 2x Arducam UC-517 B0270 | IMX477 12MP, IR-Cut for day/night |
 | AI Accelerator | Hailo-8L AI HAT+ (13 TOPS) | Real-time object detection |
-| Microphones | 2x Adafruit SPH0645 (I2S MEMS) | Bird song capture, shared bus |
+| Microphones | 2x Adafruit 3421 (SPH0645LM4H) | I2S MEMS, bird song capture, shared bus |
 | Power | UPS HAT + solar panel | Outdoor uninterrupted power |
 | Enclosure | IP65 weatherproof | Outdoor deployment |
 

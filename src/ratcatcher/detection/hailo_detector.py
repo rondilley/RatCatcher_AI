@@ -167,6 +167,22 @@ class HailoDetector:
                 getattr(out_order, "name", str(out_order)) in _NMS_ORDER_NAMES
             )
 
+            # For an on-chip-NMS HEF the class count is baked into the
+            # output vstream, so read it rather than inferring it from a
+            # tensor shape at inference time.  It decides whether the
+            # emitted class IDs are COCO-80 indices or direct indices into
+            # RATCATCHER_CLASSES -- the same custom-vs-COCO distinction the
+            # raw-tensor path makes from its channel count.  Without this,
+            # a custom 5-class HEF emits IDs 0-4, none of which appear in
+            # COCO_CLASS_MAP, and every detection is silently discarded.
+            self._nms_num_classes: int | None = None
+            if self._nms_on_chip:
+                nms_shape = getattr(
+                    self._output_vstream_info[0], "nms_shape", None
+                )
+                if nms_shape is not None:
+                    self._nms_num_classes = int(nms_shape.number_of_classes)
+
             # The HEF's input layer is quantised UINT8.  Feeding UINT8
             # directly skips a host-side float conversion and quarters the
             # PCIe traffic.  (Requesting FLOAT32 here would also require
@@ -207,12 +223,21 @@ class HailoDetector:
 
         logger.info(
             "HailoDetector: loaded %s on Hailo NPU (input %dx%d, "
-            "conf>=%.2f, nms=%s)",
+            "conf>=%.2f, nms=%s, classes=%s)",
             self._model_path.name,
             self._input_size[0],
             self._input_size[1],
             confidence_threshold,
             "on-chip" if self._nms_on_chip else f"host (IoU>={nms_threshold:.2f})",
+            # A stock Model Zoo HEF reports 80 (COCO, no squirrel or rat
+            # class); the custom RatCatcher HEF reports 5.  Worth stating
+            # outright, because the two load identically and differ only
+            # in what they can possibly detect.
+            f"{self._nms_num_classes} (custom)"
+            if self._nms_num_classes == len(RATCATCHER_CLASSES)
+            else f"{self._nms_num_classes} (COCO)"
+            if self._nms_num_classes is not None
+            else "raw tensor, determined per frame",
         )
 
     # -- Lifecycle --------------------------------------------------------------
@@ -289,26 +314,39 @@ class HailoDetector:
     ) -> list[Detection]:
         """Parse a HAILO_NMS_BY_CLASS output.
 
-        The result is indexed ``[batch][coco_class_id]`` and each entry is
-        an ``(n, 5)`` float32 array whose rows are
+        The result is indexed ``[batch][class_id]`` and each entry is an
+        ``(n, 5)`` float32 array whose rows are
         ``[y_min, x_min, y_max, x_max, score]`` in normalised (0-1) frame
         coordinates.  Boxes are already de-duplicated on-chip, so no host
         NMS is needed -- only the configured confidence filter, since the
         HEF's compiled-in score threshold is typically looser.
+
+        ``class_id`` is a COCO-80 index for a stock Model Zoo HEF, or a
+        direct index into ``RATCATCHER_CLASSES`` for a custom-compiled
+        5-class one; the class count read from the HEF at load time tells
+        the two apart.
         """
+        custom_model = self._nms_num_classes == len(RATCATCHER_CLASSES)
+
         # Unwrap the batch dimension.
         per_class = output[0] if len(output) > 0 else []  # type: ignore[index]
 
         results: list[Detection] = []
-        for coco_id, boxes in enumerate(per_class):
+        for class_id, boxes in enumerate(per_class):
             arr = np.asarray(boxes, dtype=np.float32)
             if arr.size == 0:
                 continue
 
-            mapped = map_coco_class(coco_id)
-            if mapped is None:
-                continue
-            rc_id, rc_name = mapped
+            if custom_model:
+                if class_id >= len(RATCATCHER_CLASSES):
+                    continue
+                rc_id = class_id
+                rc_name = RATCATCHER_CLASSES[rc_id]
+            else:
+                mapped = map_coco_class(class_id)
+                if mapped is None:
+                    continue
+                rc_id, rc_name = mapped
 
             for row in arr.reshape(-1, arr.shape[-1]):
                 score = float(row[4])

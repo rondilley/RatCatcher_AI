@@ -24,35 +24,68 @@ from ratcatcher.detection.hailo_detector import _HAILO_AVAILABLE, HailoDetector
 
 MODEL_PATH = Path(__file__).parent.parent / "models" / "yolov8n.hef"
 
+
+def _device_is_reachable() -> bool:
+    """Is there an NPU this process can actually open?
+
+    ``hailo_platform`` importing and a HEF existing on disk are not
+    enough: the driver is a kernel module that does not survive a kernel
+    upgrade (see scripts/fix_hailo_driver.sh), and when it is missing the
+    hardware tests error out in fixture setup instead of skipping.
+    Opening a VDevice is the only honest check, and it is cheap.
+    """
+    if not _HAILO_AVAILABLE:
+        return False
+    try:
+        from hailo_platform import VDevice
+    except ImportError:
+        return False
+    try:
+        device = VDevice()
+    except Exception:
+        return False
+    device.release()
+    return True
+
+
 requires_hailo = pytest.mark.skipif(
-    not (_HAILO_AVAILABLE and MODEL_PATH.is_file()),
-    reason="requires hailo_platform and a compiled HEF in models/",
+    not (_HAILO_AVAILABLE and MODEL_PATH.is_file() and _device_is_reachable()),
+    reason="requires hailo_platform, a reachable NPU, and a HEF in models/",
 )
 
 
 # -- helpers ----------------------------------------------------------------
 
-def _parser(confidence_threshold: float = 0.25) -> HailoDetector:
+def _parser(
+    confidence_threshold: float = 0.25,
+    nms_num_classes: int = 80,
+) -> HailoDetector:
     """Build a detector shell that can parse output but owns no device.
 
-    ``_parse_nms_output`` touches only ``_confidence_threshold``, so the
-    decode logic can be tested without a Hailo attached.
+    ``_parse_nms_output`` touches only ``_confidence_threshold`` and
+    ``_nms_num_classes``, so the decode logic can be tested without a
+    Hailo attached.  The class count defaults to 80, matching the stock
+    Model Zoo HEF; pass ``len(RATCATCHER_CLASSES)`` for the custom one.
     """
     det = HailoDetector.__new__(HailoDetector)
     det._confidence_threshold = confidence_threshold
+    det._nms_num_classes = nms_num_classes
     return det
 
 
-def _nms_output(per_class: dict[int, list[list[float]]]) -> list:
-    """Build a HAILO_NMS_BY_CLASS output from {coco_id: [[y0,x0,y1,x1,s]]}.
+def _nms_output(
+    per_class: dict[int, list[list[float]]], num_classes: int = 80
+) -> list:
+    """Build a HAILO_NMS_BY_CLASS output from {class_id: [[y0,x0,y1,x1,s]]}.
 
-    The real output is a single-element batch list holding 80 arrays of
-    shape ``(n, 5)`` -- one per COCO class, empty where nothing survived
-    the on-chip NMS.
+    The real output is a single-element batch list holding one array of
+    shape ``(n, 5)`` per class, empty where nothing survived the on-chip
+    NMS.  ``num_classes`` is 80 for the stock COCO HEF and 5 for a custom
+    RatCatcher build.
     """
     classes = [
         np.asarray(per_class.get(i, []), dtype=np.float32).reshape(-1, 5)
-        for i in range(80)
+        for i in range(num_classes)
     ]
     return [classes]
 
@@ -126,6 +159,96 @@ class TestParseNmsOutput:
 
     def test_empty_output_returns_no_detections(self):
         assert _parser()._parse_nms_output(_nms_output({}), 640, 640) == []
+
+
+# ---------------------------------------------------------------------------
+# On-chip NMS from a custom-compiled 5-class HEF
+#
+# The stock Model Zoo HEF emits COCO-80 class indices; a HEF built by
+# training/build_hef.py emits indices straight into RATCATCHER_CLASSES.
+# Both arrive in the same HAILO_NMS_BY_CLASS layout, so the only thing
+# distinguishing them is the class count read off the HEF at load time.
+# Before that check existed, every custom detection was mapped through
+# COCO_CLASS_MAP, matched nothing, and was silently dropped.
+# ---------------------------------------------------------------------------
+
+class TestParseNmsOutputCustomModel:
+
+    NUM_CLASSES = len(RATCATCHER_CLASSES)
+
+    def _custom(self, confidence_threshold: float = 0.25) -> HailoDetector:
+        return _parser(
+            confidence_threshold=confidence_threshold,
+            nms_num_classes=self.NUM_CLASSES,
+        )
+
+    def test_class_ids_index_ratcatcher_classes_directly(self):
+        """Class 1 is squirrel, not COCO's bicycle."""
+        out = _nms_output(
+            {i: [[0.1, 0.1, 0.2, 0.2, 0.9]] for i in range(self.NUM_CLASSES)},
+            num_classes=self.NUM_CLASSES,
+        )
+        dets = self._custom()._parse_nms_output(out, 640, 640)
+
+        assert len(dets) == self.NUM_CLASSES
+        assert sorted(d.class_name for d in dets) == sorted(RATCATCHER_CLASSES)
+        for d in dets:
+            assert d.class_name == RATCATCHER_CLASSES[d.class_id]
+
+    def test_pest_classes_survive(self):
+        """The whole point of the custom model: COCO has no squirrel or rat,
+        so on the stock HEF these two class IDs could never be reported."""
+        out = _nms_output(
+            {1: [[0.1, 0.1, 0.3, 0.3, 0.88]],
+             2: [[0.4, 0.4, 0.6, 0.6, 0.77]]},
+            num_classes=self.NUM_CLASSES,
+        )
+        dets = self._custom()._parse_nms_output(out, 640, 640)
+
+        assert sorted(d.class_name for d in dets) == ["rat", "squirrel"]
+
+    def test_coco_mapping_is_not_applied(self):
+        """Class 0 is bird here. Under COCO it is person, which maps to
+        nothing -- the regression this guards against."""
+        out = _nms_output(
+            {0: [[0.1, 0.1, 0.2, 0.2, 0.9]]}, num_classes=self.NUM_CLASSES
+        )
+        dets = self._custom()._parse_nms_output(out, 640, 640)
+
+        assert len(dets) == 1
+        assert dets[0].class_name == "bird"
+
+    def test_geometry_matches_the_coco_path(self):
+        """Class interpretation changes; box decoding does not."""
+        out = _nms_output(
+            {3: [[0.25, 0.5, 0.75, 1.0, 0.9]]}, num_classes=self.NUM_CLASSES
+        )
+        dets = self._custom()._parse_nms_output(out, orig_w=800, orig_h=400)
+
+        assert dets[0].bbox == (400, 100, 400, 200)
+        assert dets[0].class_name == "cat"
+
+    def test_confidence_threshold_still_applies(self):
+        out = _nms_output(
+            {1: [[0.1, 0.1, 0.5, 0.5, 0.9],
+                 [0.2, 0.2, 0.6, 0.6, 0.21]]},
+            num_classes=self.NUM_CLASSES,
+        )
+        dets = self._custom(confidence_threshold=0.25)._parse_nms_output(
+            out, 640, 640
+        )
+
+        assert [round(d.confidence, 2) for d in dets] == [0.9]
+
+    def test_unknown_class_count_falls_back_to_coco_mapping(self):
+        """A HEF whose class count could not be read (nms_num_classes is
+        None) must not be mistaken for a custom model."""
+        det = _parser(nms_num_classes=None)
+        out = _nms_output({14: [[0.1, 0.1, 0.2, 0.2, 0.9]]})
+        dets = det._parse_nms_output(out, 640, 640)
+
+        assert len(dets) == 1
+        assert dets[0].class_name == "bird"
 
 
 # ---------------------------------------------------------------------------

@@ -125,7 +125,10 @@ class TestDetectionConfigDefaults:
 
         assert d.enabled is True
         assert d.backend == "auto"
-        assert d.model_path == "yolov8n.onnx"
+        # The custom 5-class model, not stock COCO yolov8n: COCO has no
+        # squirrel or rat class, so shipping it as the default would leave
+        # the detector unable to report a pest at all.
+        assert d.model_path == "ratcatcher_best.onnx"
         assert d.confidence_threshold == pytest.approx(0.45)
         assert d.nms_threshold == pytest.approx(0.45)
         assert d.input_size == (640, 640)

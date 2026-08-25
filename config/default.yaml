@@ -57,8 +57,19 @@ detection:
   enabled: true
   # "auto", "hailo", "ncnn", or "opencv_dnn"
   backend: "auto"
-  # Path to model file (relative to models/ directory)
-  model_path: "yolov8n.onnx"
+  # Path to model file (relative to models/ directory).
+  #
+  # One setting covers every backend: the factory swaps the suffix for
+  # ".hef" on the Hailo path and keeps the ".onnx" for the OpenCV DNN
+  # fallback, so both look for the same model by stem.
+  #
+  # This must name the CUSTOM model, not stock yolov8n. Stock is COCO-80,
+  # which has no squirrel and no rat class -- on it the detector can only
+  # ever report bird and cat, which defeats the point of the project.
+  # Until models/ratcatcher_best.hef is compiled (see scripts/build_hef.sh,
+  # which needs an x86 machine), "auto" falls back to the ONNX on the CPU:
+  # slower, but it can actually see a pest.
+  model_path: "ratcatcher_best.onnx"
   # Minimum confidence to report a detection
   confidence_threshold: 0.45
   # Non-maximum suppression IoU threshold
