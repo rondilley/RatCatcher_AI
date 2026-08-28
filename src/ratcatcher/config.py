@@ -156,7 +156,9 @@ class DisplayConfig:
     port: str = "auto"
     baud_rate: int = 115200
     # Seconds to wait for a panel to identify itself during a probe
-    probe_seconds: float = 2.0
+    # Must exceed the ESP32 boot time; opening the port resets the
+    # panel and its hello arrives about 2.4 s later.
+    probe_seconds: float = 6.0
     # Seconds between reconnection attempts after the panel goes away
     reconnect_seconds: float = 10.0
 

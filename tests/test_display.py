@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import pty
+import select
 import threading
 import time
 from dataclasses import replace
@@ -527,6 +528,10 @@ class PanelEmulator:
         if self._stop.is_set():
             return  # a test may close the panel before the fixture does
         self._stop.set()
+        # Join before closing. The reader wakes within 100 ms and
+        # releases the master, so both descriptors are genuinely closed
+        # by the time stop() returns and a later write to the slave
+        # fails with EIO, as an unplugged panel would.
         self._thread.join(timeout=2.0)
         for handle in (self._master, self._slave):
             try:
@@ -537,6 +542,18 @@ class PanelEmulator:
     def _run(self) -> None:
         buffer = bytearray()
         while not self._stop.is_set():
+            # select, not a bare os.read. A thread blocked in os.read
+            # holds the master's open file description alive, so
+            # os.close in stop() would not actually close the pty and
+            # writes to the slave would keep succeeding. Waking every
+            # 100 ms lets the thread honour the stop flag and release
+            # the master.
+            try:
+                ready, _, _ = select.select([self._master], [], [], 0.1)
+            except OSError:
+                return
+            if not ready:
+                continue
             try:
                 chunk = os.read(self._master, 1024)
             except OSError:
@@ -566,7 +583,12 @@ class PanelEmulator:
             reply = {"v": PROTOCOL_VERSION, "t": "ack", "seq": message.get("seq", 0)}
         else:
             return
-        os.write(self._master, (json.dumps(reply) + "\n").encode())
+        try:
+            os.write(self._master, (json.dumps(reply) + "\n").encode())
+        except OSError:
+            # The test closed the port while this reply was in flight.
+            # Guarded like the read in _run, for the same reason.
+            return
 
 
 @pytest.fixture

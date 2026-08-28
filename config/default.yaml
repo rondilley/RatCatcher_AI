@@ -199,7 +199,10 @@ display:
   # machine carries serial devices that must not be opened.
   port: "auto"
   baud_rate: 115200
-  probe_seconds: 2.0
+  # Must exceed the ESP32 boot time: opening the port resets the
+  # panel, and its hello arrives about 2.4 s later. See
+  # RESET_SETTLE_SECONDS in src/ratcatcher/display/factory.py.
+  probe_seconds: 6.0
   reconnect_seconds: 10.0
 
   # For file source: encoded frames are appended here instead of being

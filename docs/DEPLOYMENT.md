@@ -548,9 +548,44 @@ ratcatcher display --port /dev/ttyUSB0 --once
 ```
 
 If step 3 reports that no panel answered, the port is there but nothing
-on it identified itself as a RatCatcher panel. Usually the board has
-the Elecrow factory firmware, which ignores the serial port. Flash it
-again:
+on it identified itself as a RatCatcher panel. There are two causes.
+Examine the first one before the second.
+
+**First, the panel can be too slow to answer.** An open of the serial
+port starts the ESP32 again, and the host cannot prevent this. DTR and
+RTS go to EN and IO0 through the usual auto-reset transistors. A Linux
+tty open asserts the two lines in the driver before pyserial can set
+them low.
+
+Measured on a CrowPanel 2.13: the ROM banner starts 0.22 s after the
+open, and the firmware `hello` comes at 2.42 s. If
+`display.probe_seconds` is below that value, detection stops before the
+panel speaks. Then the panel looks like it is not there, although it
+operates correctly. The default is 6.0. Increase it for a slower board.
+
+To see the boot, listen to the port with no RatCatcher code between you
+and it:
+
+```bash
+# Reset the board, then show what it sends. A correct panel gives the
+# ESP-ROM banner and then one hello line.
+venv/bin/python -c "
+import serial, time
+p = serial.Serial('/dev/ttyUSB0', 115200, timeout=0.3)
+p.dtr = False; p.rts = True; time.sleep(0.15); p.rts = False
+end = time.time() + 5
+buf = b''
+while time.time() < end: buf += p.read(4096)
+print(buf.decode(errors='replace'))
+"
+```
+
+A `{"v":1,"t":"hello",...}` line means that the firmware is correct,
+and that the fault is in the host times above.
+
+**Second, the board can have the incorrect firmware.** With no hello in
+that capture, the board probably has the Elecrow factory firmware,
+which ignores the serial port. Flash it again:
 
 ```bash
 ./scripts/build_panel_firmware.sh --upload --port /dev/ttyUSB0
@@ -558,6 +593,11 @@ again:
 
 Other symptoms:
 
+- **`display --once` says "Frame sent" and the screen stays empty.**
+  Use `--once` with no `--port`. A `--port` value does not do the
+  handshake. Thus the host writes the frame while the ESP32 is in its
+  ROM loader, and the frame goes away with no message. The `auto` path
+  waits for the `hello` first.
 - **The screen shows STALE.** The panel got no frame for seven minutes.
   RatCatcher does not run, or the port went away. Check the service.
 - **The screen shows the incorrect colours, or it is inverted.** The

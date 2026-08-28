@@ -107,9 +107,13 @@ class SerialPanel:
 
         import serial  # imported here so pyserial stays an optional extra
 
-        # Both control lines are held low across the open. On an ESP32
-        # board they are wired to EN and IO0, so the default assertion
-        # would reset the panel every time RatCatcher connected.
+        # Both control lines are set low across the open. On an ESP32
+        # board they are wired to EN and IO0 through the usual
+        # auto-reset transistors. This is the most the host can do, and
+        # it is not enough on Linux: the tty open asserts DTR and RTS in
+        # the driver before pyserial applies these, so the panel reboots
+        # anyway. open() therefore waits the board out before the first
+        # frame -- see RESET_SETTLE_SECONDS in display.factory.
         handle = serial.Serial()
         handle.port = self._port
         handle.baudrate = self._baud_rate
@@ -131,9 +135,25 @@ class SerialPanel:
         self._confirmed = False
         logger.info("Status panel connected on %s", self._port)
 
+        # Wait out the reset that the open just caused. Without this the
+        # first frame is written into the ROM loader and vanishes, and
+        # the screen stays blank with every layer reporting success.
+        from ratcatcher.display.factory import RESET_SETTLE_SECONDS, wait_for_hello
+
         try:
             handle.reset_input_buffer()
-            handle.write(encode_ping())
+            if wait_for_hello(handle, RESET_SETTLE_SECONDS):
+                self._confirmed = True
+                logger.info("Status panel answered on %s", self._port)
+            else:
+                # No answer is not fatal: a panel that draws correctly but
+                # cannot transmit is still worth sending frames to.
+                logger.warning(
+                    "Status panel on %s did not answer within %.1f s; "
+                    "sending frames anyway",
+                    self._port,
+                    RESET_SETTLE_SECONDS,
+                )
         except (serial.SerialException, OSError) as exc:
             logger.debug("Panel ping failed on open: %s", exc)
 

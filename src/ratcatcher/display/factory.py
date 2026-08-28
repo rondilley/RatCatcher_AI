@@ -9,12 +9,24 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import Any
 
 from ratcatcher.config import DisplayConfig
 from ratcatcher.display.panel import FilePanel, NullPanel, SerialPanel, StatusPanel
 from ratcatcher.display.protocol import decode_line, encode_ping, is_hello
 
 logger = logging.getLogger(__name__)
+
+# Opening a serial port resets an ESP32 panel, and nothing the host can
+# do stops it. The control lines go to EN and IO0 through the usual
+# auto-reset transistors, and a Linux tty open asserts DTR and RTS in
+# the driver before pyserial can apply dtr=False/rts=False. Measured on
+# a CrowPanel 2.13: the first byte of the ROM banner arrives 0.22 s
+# after the open, and the firmware hello arrives at 2.42 s, whether or
+# not the host sends anything. Anything written before that is lost in
+# the ROM loader.
+RESET_SETTLE_SECONDS = 3.0
+_PING_INTERVAL_SECONDS = 0.5
 
 # USB serial bridges found on ESP32 development boards. Automatic port
 # detection is restricted to these because probing writes a byte to
@@ -179,7 +191,8 @@ def _probe(port: str, baud_rate: float, probe_seconds: float) -> bool:
     handle.baudrate = int(baud_rate)
     handle.timeout = 0.2
     handle.write_timeout = 1.0
-    # Held low so the probe does not reset the board it is testing.
+    # Set low before the open, which is the most a caller can do. It is
+    # not enough on Linux: see the note on RESET_SETTLE_SECONDS.
     handle.dtr = False
     handle.rts = False
 
@@ -191,20 +204,7 @@ def _probe(port: str, baud_rate: float, probe_seconds: float) -> bool:
 
     try:
         handle.reset_input_buffer()
-        handle.write(encode_ping())
-        deadline = time.monotonic() + probe_seconds
-        buffer = bytearray()
-        while time.monotonic() < deadline:
-            chunk = handle.read(256)
-            if chunk:
-                buffer.extend(chunk)
-                while b"\n" in buffer:
-                    raw, _, rest = bytes(buffer).partition(b"\n")
-                    buffer = bytearray(rest)
-                    message = decode_line(raw)
-                    if message is not None and is_hello(message):
-                        return True
-        return False
+        return wait_for_hello(handle, probe_seconds)
     except (serial.SerialException, OSError) as exc:
         logger.debug("Probe of %s failed: %s", port, exc)
         return False
@@ -213,3 +213,36 @@ def _probe(port: str, baud_rate: float, probe_seconds: float) -> bool:
             handle.close()
         except Exception:  # noqa: BLE001 -- closing must never raise
             pass
+
+
+def wait_for_hello(handle: Any, seconds: float) -> bool:
+    """Ping until the panel answers with a hello, or the time runs out.
+
+    The ping repeats rather than being sent once, because opening the
+    port resets the board (see RESET_SETTLE_SECONDS). A single ping sent
+    at the open lands while the ESP32 is still in its ROM loader and is
+    discarded, so the only thing that could ever answer it was the
+    hello the firmware sends at the end of its own boot.
+    """
+    deadline = time.monotonic() + seconds
+    next_ping = 0.0
+    buffer = bytearray()
+    while time.monotonic() < deadline:
+        now = time.monotonic()
+        if now >= next_ping:
+            try:
+                handle.write(encode_ping())
+            except Exception:  # noqa: BLE001 -- a closed port ends the wait
+                return False
+            next_ping = now + _PING_INTERVAL_SECONDS
+        chunk = handle.read(256)
+        if not chunk:
+            continue
+        buffer.extend(chunk)
+        while b"\n" in buffer:
+            raw, _, rest = bytes(buffer).partition(b"\n")
+            buffer = bytearray(rest)
+            message = decode_line(raw)
+            if message is not None and is_hello(message):
+                return True
+    return False
