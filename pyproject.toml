@@ -26,8 +26,13 @@ audio = [
     # ai-edge-litert is its maintained successor and does.
     "ai-edge-litert>=1.0",
 ]
+display = [
+    # Serial link to the Elecrow CrowPanel e-paper status panel.
+    "pyserial>=3.5",
+]
 dev = [
     "pytest>=7.0",
+    "pyserial>=3.5",
 ]
 cpu = [
     "ncnn>=1.0.20230816",

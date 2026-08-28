@@ -140,6 +140,47 @@ class AudioConfig:
 
 
 @dataclass(frozen=True)
+class DisplayConfig:
+    """Elecrow CrowPanel ESP32 2.13-inch e-paper status panel over USB.
+
+    The panel is an output only. It reads nothing from the pipeline and
+    holds nothing the pipeline needs, so it is safe to unplug at any
+    time and safe to leave unconfigured.
+    """
+
+    enabled: bool = False
+    # "auto" (serial, falling back to none), "serial", "file", or "null"
+    source_type: str = "auto"
+    # Serial device path. "auto" probes every known USB serial bridge
+    # and keeps the port whose panel answers the identification request.
+    port: str = "auto"
+    baud_rate: int = 115200
+    # Seconds to wait for a panel to identify itself during a probe
+    probe_seconds: float = 2.0
+    # Seconds between reconnection attempts after the panel goes away
+    reconnect_seconds: float = 10.0
+
+    # For file source: where the encoded frames are written
+    file_path: str | None = None
+
+    # -- what the panel shows --
+    # Counting window: "today" (since local midnight), "24h", or "all"
+    window: str = "today"
+
+    # -- how often it is redrawn --
+    # Seconds between readings. A reading whose contents match the last
+    # one drawn is not sent, so this is an upper bound on refresh rate,
+    # not a refresh rate.
+    refresh_seconds: float = 30.0
+    # Redraw at least this often even when nothing has changed, so a
+    # stopped host shows as a stale clock rather than as a live screen.
+    heartbeat_seconds: float = 300.0
+    # Partial refreshes leave a ghost of the previous image. Clear it
+    # with a full refresh every this many frames.
+    full_refresh_every: int = 15
+
+
+@dataclass(frozen=True)
 class MonitoringConfig:
     health_interval_seconds: int = 60
     temp_warning_c: float = 75.0
@@ -164,6 +205,7 @@ class Config:
     )
     storage: StorageConfig = field(default_factory=StorageConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
+    display: DisplayConfig = field(default_factory=DisplayConfig)
     alerts: AlertConfig = field(default_factory=AlertConfig)
     monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
 
@@ -259,6 +301,7 @@ def load_config(config_path: str | Path | None = None) -> Config:
         classification=_build_section(ClassificationConfig, raw.get("classification")),
         storage=_build_section(StorageConfig, raw.get("storage")),
         audio=_build_section(AudioConfig, raw.get("audio")),
+        display=_build_section(DisplayConfig, raw.get("display")),
         alerts=_build_section(AlertConfig, raw.get("alerts")),
         monitoring=_build_section(MonitoringConfig, raw.get("monitoring")),
     )

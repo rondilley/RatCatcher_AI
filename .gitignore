@@ -36,6 +36,23 @@ models/*.har
 models/BirdNET_*
 !models/.gitkeep
 
+# Panel firmware build tree.
+#
+# .arduino/ holds arduino-cli, the ESP32 core and ArduinoJson, all
+# fetched by scripts/build_panel_firmware.sh. The EPD*/spi* files are
+# Elecrow's e-paper driver, downloaded from their repository at build
+# time for the same reason the BirdNET weights are: the terms stay with
+# their author rather than being vendored here.
+firmware/.arduino/
+firmware/build/
+firmware/ratcatcher_panel/EPD.h
+firmware/ratcatcher_panel/EPD.cpp
+firmware/ratcatcher_panel/EPD_Init.h
+firmware/ratcatcher_panel/EPD_Init.cpp
+firmware/ratcatcher_panel/EPDfont.h
+firmware/ratcatcher_panel/spi.h
+firmware/ratcatcher_panel/spi.cpp
+
 # Media output
 output/
 clips/

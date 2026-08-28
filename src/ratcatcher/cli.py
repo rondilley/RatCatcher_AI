@@ -84,6 +84,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable bird song detection even if enabled in the config",
     )
 
+    display_group = run_parser.add_mutually_exclusive_group()
+    display_group.add_argument(
+        "--display",
+        dest="display",
+        action="store_true",
+        default=None,
+        help="Enable the CrowPanel e-paper status panel",
+    )
+    display_group.add_argument(
+        "--no-display",
+        dest="display",
+        action="store_false",
+        help="Disable the status panel even if enabled in the config",
+    )
+
     stats_parser = subparsers.add_parser("stats", help="Show detection statistics")
     stats_parser.add_argument(
         "--last",
@@ -119,6 +134,37 @@ def build_parser() -> argparse.ArgumentParser:
         "--identify",
         action="store_true",
         help="Run BirdNET on the recording and report any species heard",
+    )
+
+    display_parser = subparsers.add_parser(
+        "display", help="Drive or test the CrowPanel e-paper status panel"
+    )
+    display_parser.add_argument(
+        "--port",
+        type=str,
+        default=None,
+        help="Serial device path (default: the configured port, or auto-detect)",
+    )
+    display_parser.add_argument(
+        "--db",
+        type=str,
+        default=None,
+        help="Path to detections database",
+    )
+    display_parser.add_argument(
+        "--list-ports",
+        action="store_true",
+        help="List every serial port worth probing, then exit",
+    )
+    display_parser.add_argument(
+        "--preview",
+        action="store_true",
+        help="Print the screen as text and exit. Opens no serial port.",
+    )
+    display_parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Send one frame to the panel and exit",
     )
 
     test_cam_parser = subparsers.add_parser("test-camera", help="Capture a test frame")
@@ -211,6 +257,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
             audio=dc_replace4(config.audio, enabled=args.audio),
         )
 
+    if args.display is not None:
+        from dataclasses import replace as dc_replace5
+        config = dc_replace5(
+            config,
+            display=dc_replace5(config.display, enabled=args.display),
+        )
+
     from ratcatcher.pipeline.engine import PipelineEngine
 
     engine = PipelineEngine(config)
@@ -232,6 +285,33 @@ def _cmd_run(args: argparse.Namespace) -> int:
     else:
         print("Audio: disabled")
 
+    # The status panel is independent for the same reason the audio path
+    # is: it must never be able to stop the cameras. It reports on the
+    # system, so a panel fault that took the system down would be the
+    # worst possible failure mode.
+    display_engine = None
+    if config.display.enabled:
+        from ratcatcher.display.engine import DisplayEngine
+        from ratcatcher.display.panel import NullPanel
+
+        display_engine = DisplayEngine(config)
+        try:
+            display_engine.start()
+            display_engine.set_state(
+                "RUN",
+                cameras=sum(1 for camera in config.cameras if camera.enabled),
+                audio_active=audio_engine is not None,
+            )
+            if isinstance(display_engine.panel, NullPanel):
+                print("Display: no panel found, continuing without one")
+            else:
+                print(f"Display: {display_engine.panel.description}")
+        except (RuntimeError, OSError) as exc:
+            print(f"WARNING: status panel disabled -- {exc}", file=sys.stderr)
+            display_engine = None
+    else:
+        print("Display: disabled")
+
     try:
         engine.start(
             camera_ids=args.cameras,
@@ -244,6 +324,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         engine.stop()
     finally:
+        if display_engine is not None:
+            display_engine.stop()
         if audio_engine is not None:
             audio_engine.stop()
 
@@ -251,6 +333,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
     print(f"\nSession stats: {stats}")
     if audio_engine is not None:
         print(f"Audio stats:   {audio_engine.stats}")
+    if display_engine is not None:
+        print(f"Panel stats:   {display_engine.stats}")
     return 0
 
 
@@ -336,11 +420,19 @@ def _cmd_health(args: argparse.Namespace) -> int:
         print("TFLite Runtime: available")
     except ImportError:
         try:
-            import tensorflow.lite  # type: ignore[import-untyped]
+            # Same order as the classifiers: tflite_runtime, then
+            # ai_edge_litert, then tensorflow. ai-edge-litert is the only
+            # one of the three with wheels for current Python versions.
+            from ai_edge_litert.interpreter import Interpreter  # type: ignore[import-untyped]  # noqa: F401
             tflite_available = True
-            print("TFLite (via TensorFlow): available")
+            print("TFLite (via ai-edge-litert): available")
         except ImportError:
-            print("TFLite: not available")
+            try:
+                import tensorflow.lite  # type: ignore[import-untyped]
+                tflite_available = True
+                print("TFLite (via TensorFlow): available")
+            except ImportError:
+                print("TFLite: not available")
 
     import shutil
     print(f"FFmpeg: {'available' if shutil.which('ffmpeg') else 'not available'}")
@@ -510,6 +602,115 @@ def _cmd_test_mic(args: argparse.Namespace) -> int:
     return 0 if problems == 0 else 1
 
 
+def _cmd_display(args: argparse.Namespace) -> int:
+    """Drive or test the e-paper status panel.
+
+    With no options it runs the panel until interrupted. ``--preview``
+    answers the first question when the screen looks wrong: is the
+    number wrong, or is the panel wrong? It builds exactly the frame
+    that would be sent and prints it, touching no serial port.
+    """
+    import time
+    from dataclasses import replace as dc_replace
+
+    from ratcatcher.config import load_config
+    from ratcatcher.display.factory import list_candidate_ports
+    from ratcatcher.display.render import render_box
+    from ratcatcher.storage.database import DetectionDatabase
+
+    if args.list_ports:
+        ports = list_candidate_ports()
+        if not ports:
+            print("No USB serial ports found.")
+            print("")
+            print("If the panel is plugged in, this account may not be able")
+            print("to see it. Add it to the 'dialout' group and log in again:")
+            print("  sudo usermod -aG dialout $USER")
+            return 1
+        print("Serial ports that could carry a panel:")
+        for port, description in ports:
+            print(f"  {port}  {description}")
+        return 0
+
+    try:
+        config = load_config()
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    _setup_logging(config.system.log_level)
+
+    if args.port is not None:
+        config = dc_replace(
+            config,
+            display=dc_replace(config.display, port=args.port, source_type="serial"),
+        )
+
+    db_path = Path(args.db) if args.db is not None else config.db_full_path
+    if not db_path.exists() and args.db is not None:
+        print(f"Database not found: {db_path}", file=sys.stderr)
+        return 1
+
+    with DetectionDatabase(db_path) as db:
+        if args.preview:
+            from ratcatcher.display.status import build_status_frame
+
+            frame = build_status_frame(db, config)
+            print(render_box(frame))
+            return 0
+
+        from ratcatcher.display.engine import DisplayEngine
+        from ratcatcher.display.panel import NullPanel
+
+        engine = DisplayEngine(config)
+
+        # A single frame needs no background thread, so --once opens the
+        # panel, writes, and closes without ever starting one.
+        try:
+            if args.once:
+                engine.open(database=db)
+            else:
+                engine.start(database=db)
+        except RuntimeError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 1
+
+        panel = engine.panel
+        if isinstance(panel, NullPanel):
+            print("ERROR: no panel found.", file=sys.stderr)
+            print("", file=sys.stderr)
+            print("Check the port with: ratcatcher display --list-ports", file=sys.stderr)
+            print(
+                "Flash the firmware with: ./scripts/build_panel_firmware.sh --upload",
+                file=sys.stderr,
+            )
+            engine.stop()
+            return 1
+
+        print(f"Panel: {panel.description}")
+
+        if args.once:
+            sent = engine.refresh_now(full=True)
+            print(render_box(engine.last_frame) if engine.last_frame else "")
+            # Leave the reading on the screen. The closing STOP frame is
+            # for a system shutting down, not for a one-shot reading.
+            engine.close(announce_stop=False)
+            print("Frame sent." if sent else "ERROR: the frame was not accepted.")
+            return 0 if sent else 1
+
+        print("Driving the panel. Press Ctrl-C to stop.")
+        try:
+            while True:
+                time.sleep(1.0)
+        except KeyboardInterrupt:
+            print("")
+        finally:
+            engine.stop()
+
+        print(f"Panel stats: {engine.stats}")
+        return 0
+
+
 def _cmd_test_camera(args: argparse.Namespace) -> int:
     """Capture a test frame from a camera."""
     from ratcatcher.config import load_config, CameraConfig
@@ -566,6 +767,7 @@ def main(argv: list[str] | None = None) -> int:
         "run": _cmd_run,
         "stats": _cmd_stats,
         "health": _cmd_health,
+        "display": _cmd_display,
         "test-camera": _cmd_test_camera,
         "test-mic": _cmd_test_mic,
     }

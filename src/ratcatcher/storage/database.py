@@ -411,6 +411,56 @@ class DetectionDatabase:
             counts[species_name] = row["cnt"]
         return counts
 
+    def get_modality_counts(self, since: str | None = None) -> list[dict]:
+        """Return detection counts grouped by modality, class and species.
+
+        Reads the ``detections_all`` view, so one call covers both the
+        cameras and the microphones. Rows with no class name are motion
+        events that never reached the detector, and are excluded: they
+        record that something moved, not that an animal was identified.
+
+        The species column is returned alongside the class name because
+        the view labels every audio row ``bird``, and BirdNET also emits
+        non-bird labels. The caller needs the species to tell those apart.
+
+        Parameters
+        ----------
+        since : str or None
+            ISO-8601 timestamp lower bound (inclusive).
+
+        Returns
+        -------
+        A list of dicts with keys ``modality``, ``class_name``,
+        ``species`` and ``count``.
+        """
+        params: list[object] = []
+        clauses = ["class_name IS NOT NULL"]
+        if since is not None:
+            clauses.append("timestamp >= ?")
+            params.append(since)
+
+        query = (
+            "SELECT modality, class_name, species, COUNT(*) AS cnt "
+            f"FROM detections_all WHERE {' AND '.join(clauses)} "
+            "GROUP BY modality, class_name, species"
+        )
+
+        try:
+            rows = self._conn.execute(query, params).fetchall()
+        except sqlite3.Error as exc:
+            logger.error("Failed to query modality counts: %s", exc)
+            raise
+
+        return [
+            {
+                "modality": row["modality"],
+                "class_name": row["class_name"],
+                "species": row["species"],
+                "count": int(row["cnt"]),
+            }
+            for row in rows
+        ]
+
     def get_detection_count(self, since: str | None = None) -> int:
         """Return the total number of detections, optionally since a timestamp."""
         params: list[object] = []

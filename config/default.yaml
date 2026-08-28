@@ -173,6 +173,56 @@ audio:
   save_clips: true
   clip_dir: "audio"
 
+display:
+  # Elecrow CrowPanel ESP32 2.13-inch e-paper status panel over USB.
+  #
+  # The panel shows what was detected in the counting window, split into
+  # what the cameras saw and what the microphones heard, plus the health
+  # of the system itself. It is an output only: nothing in the pipeline
+  # reads from it, so it can be unplugged at any time.
+  #
+  # It needs the RatCatcher firmware. The board ships with an Elecrow
+  # demo that ignores the serial port. Flash it with:
+  #   ./scripts/build_panel_firmware.sh --port /dev/ttyUSB0 --upload
+  enabled: false
+
+  # "auto" (serial, falling back to no panel), "serial", "file", "null"
+  source_type: "auto"
+
+  # Serial device path, or "auto" to find it.
+  #
+  # "auto" opens every port carrying a known USB serial bridge, sends an
+  # identification request, and keeps the one whose panel answers. The
+  # handshake is needed because the CrowPanel presents a plain CH340
+  # descriptor, identical to that of any other cheap board, so the USB
+  # identifiers alone cannot tell them apart. Name the port here if the
+  # machine carries serial devices that must not be opened.
+  port: "auto"
+  baud_rate: 115200
+  probe_seconds: 2.0
+  reconnect_seconds: 10.0
+
+  # For file source: encoded frames are appended here instead of being
+  # sent to a panel. Used for development with no hardware attached.
+  file_path: null
+
+  # Counting window: "today" (since local midnight), "24h", or "all"
+  window: "today"
+
+  # Seconds between readings. A reading identical to the one already on
+  # the panel is not sent, so this is an upper bound on how often the
+  # panel is written to, not a fixed refresh rate.
+  refresh_seconds: 30.0
+
+  # Redraw at least this often even when nothing has changed. Without
+  # it, a host that has died leaves a screen that still reads RUN.
+  heartbeat_seconds: 300.0
+
+  # Partial refresh is fast and quiet but leaves a ghost of the previous
+  # image behind, and the ghosts build up. Clear them with a full
+  # refresh every this many frames.
+  full_refresh_every: 15
+
 alerts:
   enabled: false
   # Alert on these detection classes

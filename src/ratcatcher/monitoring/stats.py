@@ -46,6 +46,149 @@ class DetectionStats:
         )
 
 
+@dataclass(frozen=True)
+class ModalityCount:
+    """How many times one category was seen and heard."""
+
+    seen: int = 0
+    heard: int = 0
+
+    @property
+    def total(self) -> int:
+        return self.seen + self.heard
+
+
+@dataclass(frozen=True)
+class CategoryCounts:
+    """Detection counts by animal category and by sense.
+
+    ``seen`` counts come from the cameras, ``heard`` counts from the
+    microphones. The two are independent observations of the same
+    garden: one animal that is both seen and heard is counted twice,
+    once in each column, because the video and audio paths never
+    correlate their events.
+    """
+
+    since: str
+    bird: ModalityCount = ModalityCount()
+    rodent: ModalityCount = ModalityCount()
+    other: ModalityCount = ModalityCount()
+
+    @property
+    def total(self) -> int:
+        return self.bird.total + self.rodent.total + self.other.total
+
+
+# Detector classes map straight onto the three display categories. The
+# custom YOLO model emits exactly these five names.
+_VIDEO_CATEGORY: dict[str, str] = {
+    "bird": "bird",
+    "squirrel": "rodent",
+    "rat": "rodent",
+    "cat": "other",
+    "unknown_animal": "other",
+}
+
+# BirdNET labels that name a sound rather than an animal. These are
+# discarded: a passing engine is not a visitor to the feeder.
+_AUDIO_NON_ANIMAL: frozenset[str] = frozenset(
+    {
+        "Engine",
+        "Environmental",
+        "Fireworks",
+        "Gun",
+        "Human",
+        "Human non-vocal",
+        "Human vocal",
+        "Human whistle",
+        "Noise",
+        "Power tools",
+        "Siren",
+    }
+)
+
+# Rodent genera that BirdNET can name. The detections_all view labels
+# every audio row "bird" because the microphone path has no detector
+# class, so the genus is the only signal available to correct it.
+_AUDIO_RODENT_GENERA: frozenset[str] = frozenset(
+    {
+        "Glaucomys",
+        "Marmota",
+        "Mus",
+        "Neotoma",
+        "Peromyscus",
+        "Rattus",
+        "Sciurus",
+        "Spermophilus",
+        "Tamias",
+        "Tamiasciurus",
+        "Urocitellus",
+    }
+)
+
+
+def categorize(
+    modality: str,
+    class_name: str | None,
+    species: str | None,
+) -> str | None:
+    """Map one detection onto "bird", "rodent" or "other".
+
+    Returns None for records that name no animal at all, which the
+    caller must not count. Audio records are judged by species because
+    the unified view reports their class as "bird" regardless.
+    """
+    if modality == "audio":
+        if species is None:
+            return "bird"
+        if species in _AUDIO_NON_ANIMAL:
+            return None
+        genus = species.split()[0] if species else ""
+        if genus in _AUDIO_RODENT_GENERA:
+            return "rodent"
+        # A BirdNET label with no space is a sound class, not a binomial.
+        if " " not in species:
+            return "other"
+        return "bird"
+
+    if class_name is None:
+        return None
+    return _VIDEO_CATEGORY.get(class_name, "other")
+
+
+def get_category_counts(
+    db: DetectionDatabase,
+    since: str | None = None,
+) -> CategoryCounts:
+    """Count detections by category and by sense for a time window.
+
+    Parameters
+    ----------
+    db:
+        Open database connection.
+    since:
+        ISO-8601 lower bound. None counts every record ever stored.
+    """
+    seen: dict[str, int] = {"bird": 0, "rodent": 0, "other": 0}
+    heard: dict[str, int] = {"bird": 0, "rodent": 0, "other": 0}
+
+    for row in db.get_modality_counts(since=since):
+        category = categorize(
+            row["modality"], row["class_name"], row["species"]
+        )
+        if category is None:
+            continue
+        bucket = heard if row["modality"] == "audio" else seen
+        bucket[category] += row["count"]
+
+    return CategoryCounts(
+        since=since if since is not None else "1970-01-01T00:00:00",
+        bird=ModalityCount(seen=seen["bird"], heard=heard["bird"]),
+        rodent=ModalityCount(seen=seen["rodent"], heard=heard["rodent"]),
+        other=ModalityCount(seen=seen["other"], heard=heard["other"]),
+    )
+
+
 def get_stats(
     db: DetectionDatabase,
     hours: float | None = None,

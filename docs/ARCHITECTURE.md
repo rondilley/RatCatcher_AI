@@ -2,236 +2,277 @@
 
 ## System Overview
 
-RatCatcher AI is a real-time wildlife detection system designed for
-outdoor bird feeder monitoring. It runs on a Raspberry Pi 5 with two
-cameras and a Hailo-8L AI accelerator, detecting pest animals and
-identifying bird species by Genus and Species.
+RatCatcher AI is a real-time wildlife detection system for outdoor bird
+feeders. It runs on a Raspberry Pi 5 with two cameras and a Hailo-8L AI
+accelerator. It detects pest animals, and it identifies bird species by
+Genus and Species.
 
-It has two independent detectors: a **video pipeline** (motion -> object
-detection -> species classification) and an **audio pipeline** (activity
-gate -> song identification). They share the SQLite database and nothing
-else -- no queues, no locks, no shared state -- so either keeps working
-when the other's hardware is unavailable.
+The system has two isolated detectors. The **video pipeline** does
+motion detection, then object detection, then species classification.
+The **audio pipeline** does an activity gate, then song identification.
+The two share the SQLite database and nothing else: no queues, no
+locks, no shared state. Thus each one continues to operate when the
+hardware of the other is not available.
+
+```mermaid
+flowchart TB
+    subgraph VIDEO["Video pipeline"]
+        direction LR
+        V1["Motion"] --> V2["Object detection"] --> V3["Species classification"]
+    end
+    subgraph AUDIO["Audio pipeline"]
+        direction LR
+        A1["Activity gate"] --> A2["Song identification"]
+    end
+    VIDEO --> DB[("SQLite<br/>the only shared item")]
+    AUDIO --> DB
+    DB --> PANEL["Status panel<br/>read only"]
+```
 
 ## Pipeline Architecture
 
-The system uses a three-stage pipeline with motion pre-filtering:
+The system uses a three-stage pipeline with a motion pre-filter:
 
-```
-+------------------+     +------------------+     +-------------------+
-| Camera Capture   |     | Motion Detection |     | Object Detection  |
-| (per camera)     | --> | MOG2 @ 320x240   | --> | YOLOv8n on Hailo  |
-| Picamera2 thread |     | ~1ms per frame   |     | ~28ms per frame   |
-+------------------+     +------------------+     +-------------------+
-                                                          |
-                              +---------------------------+
-                              |
-                    +---------+-----------+
-                    |                     |
-              [bird detected]       [pest detected]
-                    |                     |
-          +---------v---------+   +-------v--------+
-          | Species Classify  |   | Log + Alert    |
-          | MobileNet V2 INT8 |   | SQLite + thumb |
-          | ~25-50ms per crop |   +----------------+
-          +-------------------+
-                    |
-          +---------v---------+
-          | Log + Clip + Thumb|
-          | SQLite + FFmpeg   |
-          +-------------------+
+```mermaid
+flowchart TB
+    CAP["Camera capture<br/>for each camera<br/>Picamera2 thread"]
+    MOT["Motion detection<br/>MOG2 @ 320x240<br/>~1 ms for each frame"]
+    DET["Object detection<br/>YOLOv8n on Hailo<br/>~28 ms for each frame"]
+    CLS["Species classification<br/>MobileNet V2 INT8<br/>~25-50 ms for each crop"]
+    LOG["Log + clip + thumbnail<br/>SQLite + FFmpeg"]
+    ALERT["Log + alert<br/>SQLite + thumbnail"]
+
+    CAP --> MOT --> DET
+    DET -- "bird" --> CLS
+    DET -- "pest" --> ALERT
+    CLS --> LOG
 ```
 
 ### Stage 0: Motion Pre-filter
 
-Runs on every frame at low resolution (320x240) using OpenCV MOG2
-background subtraction. Frames without motion skip all neural network
-inference entirely. This saves ~90% of compute since most frames
-contain no activity.
+This stage runs on each frame at a low resolution (320x240). It uses
+OpenCV MOG2 background subtraction. A frame with no motion does no
+neural network inference. This saves approximately 90% of the processor
+time, because most frames contain no animal.
 
 Key parameters:
-- Processing resolution: 320x240 (independent of camera resolution)
-- Morphological cleanup: erode (3x3) then dilate (7x7)
-- Minimum contour area: 0.5% of frame area
-- Grid-based cooldown (8x6 cells, 2s default) prevents duplicate detections
-- Optional ROI polygon masking to restrict detection zones
+- Resolution: 320x240 (not related to the camera resolution)
+- Morphological cleanup: erode (3x3), then dilate (7x7)
+- Minimum contour area: 0.5% of the frame area
+- Grid cooldown (8x6 cells, 2 s default) prevents a duplicate detection
+- Optional ROI polygon mask limits the detection zones
 
 ### Stage 1: Object Detection (YOLO)
 
-Runs only on frames where motion was detected. YOLOv8n classifies
-detected objects into five categories:
+This stage runs only on the frames that have motion. YOLOv8n puts the
+objects it finds into five categories:
 
 | Class | ID | Description |
 |---|---|---|
-| bird | 0 | Any bird (passed to Stage 2) |
+| bird | 0 | All birds (these go to Stage 2) |
 | squirrel | 1 | Squirrel species |
 | rat | 2 | Rats, mice |
 | cat | 3 | Domestic cats |
 | unknown_animal | 4 | Other animals |
 
-Three interchangeable backends:
+Three backends do the same work:
 
-| Backend | Hardware | Performance | Use Case |
+| Backend | Hardware | Performance | Use |
 |---|---|---|---|
-| HailoDetector | Hailo-8L NPU | ~35 FPS/camera | Production (RPi5) |
-| NCNNDetector | ARM CPU | ~12 FPS | RPi5 without Hailo |
-| OpenCVDetector | Any CPU | ~4-8 FPS | Development (Windows/Linux) |
+| HailoDetector | Hailo-8L NPU | ~35 FPS for each camera | Production (RPi5) |
+| NCNNDetector | ARM CPU | ~12 FPS | RPi5 with no Hailo |
+| OpenCVDetector | All CPUs | ~4-8 FPS | Development (Linux x86-64) |
 
-The factory in `detection/factory.py` auto-selects the best available
+The factory in `detection/factory.py` selects the best available
 backend at startup.
 
-**Custom-trained model:** A YOLOv8n trained on Open Images V7 data
-(`models/ratcatcher_best.onnx`, 11.7 MB) outputs our 5 classes directly.
-Backends auto-detect this by checking output tensor shape (9 values per
-detection = 5 classes + 4 box coords). No COCO remapping needed.
+**Custom-trained model:** `models/ratcatcher_best.onnx` (11.7 MB)
+gives the five classes directly. The backends find this condition from the shape of the output
+tensor (9 values for each detection = 5 classes + 4 box coordinates).
+No COCO remap is necessary.
 
-**COCO fallback:** If using COCO-pretrained weights instead, backends
-apply `map_coco_class()` to remap COCO IDs (bird=14, cat=15, other
-animals=unknown_animal). Squirrels and rats are not in COCO.
+**COCO fallback:** with COCO-pretrained weights, the backends use
+`map_coco_class()` to remap the COCO IDs (bird=14, cat=15, other
+animals=unknown_animal). COCO has no squirrel class and no rat class.
 
 ### Stage 2: Species Classification
 
-Runs only when Stage 1 detects a bird. Crops the bird region from the
-full-resolution frame and classifies it.
+This stage runs only when Stage 1 finds a bird. It crops the bird area
+from the full-resolution frame and classifies the crop.
 
 - **Model:** MobileNet V2 iNaturalist Bird Classifier
 - **Format:** TFLite INT8 quantized (3.6 MB)
-- **Species:** 965 bird species; 50 Western US feeder species in taxonomy
+- **Species:** 965 bird species. The taxonomy holds 50 Western US feeder species
 - **Input:** 224x224 RGB
-- **Output:** Softmax over 965 classes
-- **Threshold:** Predictions below 70% confidence reported as unknown
+- **Output:** softmax on 965 classes
+- **Threshold:** a prediction below 70% confidence becomes unknown
 
-The taxonomy maps model output indices to species info (Genus, Species,
-Common Name, Family). Species not in the taxonomy appear as "unknown_NNN".
+The taxonomy maps the model output indices to the species data (Genus,
+Species, Common Name, Family). A species that is not in the taxonomy
+shows as "unknown_NNN".
 
-## Audio Pipeline (Independent Detector)
+## Audio Pipeline (Isolated Detector)
 
-```
-+------------------+     +------------------+     +-------------------+
-| I2S Capture      |     | Conditioning     |     | Activity Gate     |
-| 2x SPH0645       | --> | DC block, split  | --> | SNR vs noise floor|
-| arecord, 48 kHz  |     | 150 Hz highpass  |     | + spectral flatness|
-+------------------+     +------------------+     +-------------------+
-                                                          |
-                                                   [sound present]
-                                                          |
-                                                +---------v---------+
-                                                | BirdNET v2.4      |
-                                                | TFLite FP32, CPU  |
-                                                | 62 ms per window  |
-                                                +-------------------+
-                                                          |
-                                                +---------v---------+
-                                                | Log + WAV clip    |
-                                                | audio_detections  |
-                                                +-------------------+
+```mermaid
+flowchart TB
+    CAP["I2S capture<br/>2x SPH0645<br/>arecord, 48 kHz"]
+    CON["Conditioning<br/>DC block, channel split<br/>150 Hz highpass"]
+    GATE["Activity gate<br/>SNR against noise floor<br/>+ spectral flatness"]
+    NET["BirdNET v2.4<br/>TFLite FP32, CPU<br/>62 ms for each window"]
+    LOG["Log + WAV clip<br/>audio_detections"]
+
+    CAP --> CON --> GATE
+    GATE -- "sound present" --> NET --> LOG
+    GATE -- "quiet" --> DROP["Discard the window"]
 ```
 
 ### Capture
 
-Two Adafruit SPH0645 I2S MEMS microphones share one I2S bus, separated
-by their SEL pin, so ALSA presents them as a single stereo device:
-channel 0 is the left mic (SEL to GND), channel 1 the right (SEL to
-3V3). `ArecordSource` runs `arecord` as a subprocess and parses S32_LE
-frames; `WavFileSource` substitutes a recording for development.
+Two Adafruit SPH0645 I2S MEMS microphones share one I2S bus. Their SEL
+pin divides them. Thus ALSA shows them as a single stereo device:
+channel 0 is the left microphone (SEL to GND), and channel 1 is the
+right microphone (SEL to 3V3). `ArecordSource` runs `arecord` as a
+subprocess and reads S32_LE frames. `WavFileSource` uses a recording
+for development.
 
-The `AudioSource` protocol exposes `is_realtime`, and the consumer picks
-its backpressure policy from it. A live device must drop windows when
-the consumer falls behind, because blocking the reader stalls the sound
-card into ALSA overruns. A file must block instead, because it delivers
-far faster than realtime and dropping silently discards the recording.
-The property belongs on the producer because only the producer knows
-whether falling behind is recoverable.
+The `AudioSource` protocol gives `is_realtime`, and the consumer
+selects its backpressure policy from that value. A live device must
+discard windows when the consumer is too slow, because a blocked reader
+stops the sound card and causes ALSA overruns. A file must wait,
+because it gives data much faster than realtime, and a discard loses
+part of the recording with no message. The property is on the producer,
+because only the producer knows if a delay is recoverable.
 
 ### Conditioning
 
-The SPH0645 has no output coupling capacitor, so every sample carries a
-large constant bias -- measured at roughly -0.044 full-scale on this
-build -- that would otherwise dominate every energy measurement
-downstream. DC removal is vectorised over the block rather than looped
-per sample. Data arrives as 18 bits left-justified in a 32-bit slot.
+The SPH0645 has no output coupling capacitor. Thus each sample has a
+large constant bias. On this build the bias measures approximately
+-0.044 of full scale. If the pipeline does not remove that bias, the
+bias controls each energy measurement downstream. The DC removal is
+vectorised on the block, and does not loop on each sample. The data
+comes as 18 bits, left-justified in a 32-bit slot.
 
 ### Activity Gate
 
-The audio analogue of the motion pre-filter, but tuned far more
-permissively, because the economics are different. Motion detection
-guards a ~28 ms NPU inference and skips most frames. The gate guards a
-62 ms CPU inference that costs about 4% of one core for two channels
-running continuously, so there is little to save by rejecting a window
-and everything to lose by rejecting a real bird.
+The gate is the audio analogue of the motion pre-filter, but it is much
+more permissive, because the economics are different. Motion detection
+prevents a ~28 ms NPU inference, and it discards most frames. The gate
+prevents a 62 ms CPU inference. That inference costs approximately 4%
+of one core for two channels that operate continuously. Thus there is
+almost nothing to save if the gate discards a window, and the cost is
+high if the gate discards a bird.
 
-Gating is per channel (the two mics have different ambients) and
-frame-based rather than whole-window: whole-window flatness rejected
-real warbles. Measured against a field soundscape with BirdNET output as
-ground truth, a 2 dB SNR margin keeps 100% of windows containing a real
-bird, 4 dB loses 14%, and 6 dB loses 48%. The gate earns its keep on
-quiet nights and in steady rain, not in a dawn chorus -- where there is
-no quiet baseline to measure against, because the birds *are* the
-ambient sound.
+The gate operates on each channel independently, because the two
+microphones have different ambient sound. It also operates on each
+frame, and not on the full window, because full-window flatness
+discarded the warbles of birds.
+
+Measured against a field soundscape, with the BirdNET output as ground
+truth, a 2 dB SNR margin keeps 100% of the windows that contain a bird.
+A 4 dB margin discards 14%, and a 6 dB margin discards 48%. The gate is
+of use on quiet nights and in continuous rain. It is of no use in a
+dawn chorus, because there is no quiet baseline for the measurement:
+the birds *are* the ambient sound.
 
 ### Identification
 
-BirdNET v2.4, TFLite FP32, 52 MB, on CPU. The classifier reads its
-window length and class count from the model file at load time rather
-than hardcoding them, matching how the detection backends auto-detect
-custom versus COCO models.
+BirdNET v2.4, TFLite FP32, 52 MB, on the CPU. The classifier reads its
+window length and its class count from the model file at load time. It
+does not hardcode them. The detection backends use the same method to
+find a custom model against a COCO model.
 
-Coverage is global (6522 classes) and includes non-bird labels (Engine,
-Dog, Human). It is not restricted to the ~50 Western US species in
-`config/species.yaml`, and BirdNET's location/date meta-model, which
-would narrow candidates by geography and season, is not used.
+The coverage is global (6522 classes) and includes non-bird labels
+(Engine, Dog, Human). It does not cover only the ~50 Western US species
+in `config/species.yaml`. The system does not use the BirdNET
+location/date meta-model, which could decrease the number of candidates
+by geography and season.
 
 ## Threading Model
 
-```
-Thread              Queue                Thread              Queue
-camera-0 --------+                  +-----> classification_queue
-                  +--> detection_queue                        |
-camera-1 --------+        |         |   classification ------+
-                           |         |                        |
-                    detection -------+                 storage_queue
-                                                              |
-                                                       storage -----> SQLite + clips
-```
-
-Each camera runs in its own thread, producing frames into a shared
-detection queue. The detection thread processes one frame at a time
-(on Hailo NPU or CPU). Bird detections go to the classification queue;
-pest detections go directly to storage. The storage thread writes to
-SQLite and creates thumbnails.
-
-All queues are bounded (64-256 items). When a queue is full, frames are
-dropped and a counter incremented. This prevents memory exhaustion
-under load while maintaining real-time responsiveness.
-
-Graceful shutdown uses a sentinel object pattern: the main thread puts
-a sentinel on each queue, and worker threads exit when they dequeue it.
-
-The audio engine runs its own two threads alongside, sharing nothing
-with the above except the database:
-
-```
-I2S stereo --> audio-capture thread (DC block, accumulate 3 s windows)
-                            |
-                      window_queue
-                            |
-               audio-analysis thread (gate per channel -> BirdNET)
-                            |
-                SQLite audio_detections + WAV clip
+```mermaid
+flowchart LR
+    C0["camera-0 thread"] --> DQ(["detection_queue"])
+    C1["camera-1 thread"] --> DQ
+    DQ --> DT["detection thread<br/>Hailo NPU or CPU"]
+    DT -- "bird" --> CQ(["classification_queue"])
+    DT -- "pest" --> SQ(["storage_queue"])
+    CQ --> CT["classification thread<br/>MobileNet V2, CPU"]
+    CT --> SQ
+    SQ --> ST["storage thread"]
+    ST --> DB[("SQLite + clips")]
 ```
 
-Shutting down `arecord` needs one ordering detail: the read end of its
-stdout pipe must be closed *before* signalling. A stopped consumer
-leaves arecord blocked writing into a full pipe, where it never reaches
-its SIGTERM handler -- `terminate()` alone waits the full timeout and
-then needs SIGKILL. Closing the pipe first gives it EPIPE and it exits
-immediately.
+Each camera runs in its own thread and puts frames into a shared
+detection queue. The detection thread processes one frame at a time, on
+the Hailo NPU or on the CPU. A bird detection goes to the
+classification queue. A pest detection goes directly to storage. The
+storage thread writes to SQLite and makes the thumbnails.
+
+All queues have a limit (64-256 items). When a queue is full, the code
+discards the frame and increases a counter. This prevents memory
+exhaustion at a high load, and keeps the real-time response.
+
+The shutdown uses a sentinel object. The shutdown sequence puts a
+sentinel on each queue, and each worker thread stops when it reads that
+sentinel.
+
+The audio engine adds its own two threads. They share only the database
+with the threads above:
+
+```mermaid
+flowchart LR
+    I2S["I2S stereo"] --> AC["audio-capture thread<br/>DC block<br/>accumulate 3 s windows"]
+    AC --> WQ(["window_queue"])
+    WQ --> AA["audio-analysis thread<br/>gate for each channel<br/>then BirdNET"]
+    AA --> DB[("SQLite audio_detections<br/>+ WAV clip")]
+```
+
+The shutdown of `arecord` needs one step in sequence: the code must
+close the read end of its stdout pipe *before* it sends the signal. If
+the consumer stops first, arecord stays blocked on a write into a full
+pipe, and it does not get to its SIGTERM handler. Then `terminate()` waits
+the full timeout, and SIGKILL becomes necessary. If the code closes the
+pipe first, arecord gets EPIPE and stops immediately.
+
+The display engine adds one more thread. It shares less, because it
+only reads.
+
+```mermaid
+flowchart LR
+    T["timer"] --> DTH["display thread"]
+    DB[("SQLite")] -- "read" --> DTH
+    HLT["health module"] --> DTH
+    DTH --> SF["StatusFrame"]
+    SF -- "write" --> USB["USB serial"]
+```
+
+Note the direction. The pipeline pushes nothing to the panel. The panel
+pulls on a timer. Only `set_state` goes in the other direction: it is
+a string with a lock, which the pipeline writes so that the header can
+show RUN, WARN or STOP.
+
+That one value is the limit. Thus no pipeline thread can wait for the
+panel. This is important, because the panel is the part that reports on
+the system: a display fault that could stop the detection is the worst
+possible failure mode.
+
+Two rules control when the host writes to the panel. The two rules are
+about the hardware, and not about the data. First, the host does not
+send a frame that is the same as the frame on the screen. Each refresh
+costs power and part of the life of the panel. Second, the host
+forces a full refresh at intervals, because a partial refresh keeps a
+ghost of the previous image, and the ghosts increase.
+
+`refresh_now()` is public, and the background thread operates on its
+own schedule. Thus the two can enter the update path. A lock protects
+it: with no lock, the two calls contend on the serial read, and each
+one takes the bytes that the other was about to read.
 
 ## Data Storage
 
 ### SQLite Database
 
-WAL journal mode for concurrent read/write. Schema:
+WAL journal mode gives concurrent read and write. Schema:
 
 ```sql
 detections (
@@ -243,10 +284,10 @@ detections (
 )
 ```
 
-Indexed on timestamp, species, and camera_id. The metadata column
-stores JSON (e.g., top-K classification results).
+Indexed on timestamp, species, and camera_id. The metadata column holds
+JSON, for example the top-K classification results.
 
-Audio identifications live in a separate table:
+The audio identifications are in a different table:
 
 ```sql
 audio_detections (
@@ -258,14 +299,14 @@ audio_detections (
 )
 ```
 
-Indexed on timestamp, species, and channel. They are kept apart from
-`detections` rather than merged: an audio event has no frame, no
-bounding box and no camera, while it does have a channel, a duration and
-acoustic measurements. One combined table would be a wide row that is
-mostly NULL whichever modality wrote it, and would force relaxing the
-NOT NULL constraint on `camera_id`.
+Indexed on timestamp, species, and channel. This table stays apart from
+`detections`. An audio event has no frame, no bounding box and no
+camera, but it does have a channel, a duration and acoustic
+measurements. One combined table would give a wide row that is mostly
+NULL for each modality. It would also make a relaxed NOT NULL
+constraint on `camera_id` necessary.
 
-A view restores the unified query surface without that cost:
+A view gives the unified query surface with none of that cost:
 
 ```sql
 CREATE VIEW detections_all AS
@@ -278,123 +319,157 @@ CREATE VIEW detections_all AS
     FROM audio_detections;
 ```
 
-`source_id` is the camera for video rows and the microphone channel for
-audio rows. Note that the two modalities are logged independently and
-are **not** correlated: a bird seen and heard at the same moment
-produces two unlinked rows.
+`source_id` is the camera for a video row, and the microphone channel
+for an audio row. Note that the system logs the two modalities
+independently and does **not** correlate them. If the system sees and
+hears one bird at the same moment, it writes two rows with no link.
 
 ### Audio Clips
 
-WAV, written with the Python standard library rather than FFmpeg, so
-the audio path carries no external encoder dependency.
+WAV, written with the Python standard library and not with FFmpeg. Thus
+the audio path has no external encoder dependency.
 
 ### Video Clips
 
-Optional H.264 MP4 clips recorded around detection events:
-- Pre-event buffer: 5 seconds (ring buffer of recent frames)
-- Post-event recording: 10 seconds
-- Encoding: FFmpeg via subprocess pipe (raw frames -> H.264)
+Optional H.264 MP4 clips around a detection event:
+- Buffer before the event: 5 seconds (a ring buffer of recent frames)
+- Recording after the event: 10 seconds
+- Encoder: FFmpeg through a subprocess pipe (raw frames to H.264)
 
 ### Thumbnails
 
-JPEG images with bounding box overlay, resized to 320px on the longest
-edge. One thumbnail per detection event.
+JPEG images with a bounding box on top, resized to 320 px on the
+longest edge. One thumbnail for each detection event.
 
 ### Retention
 
 Automatic cleanup policy:
-- Delete clips/thumbnails older than 30 days (configurable)
-- Enforce maximum disk usage (10 GB default)
-- Oldest files deleted first when over limit
+- Delete a clip or a thumbnail after 30 days (configurable)
+- Keep the disk use below a maximum (10 GB default)
+- Delete the oldest files first when the use is above the limit
 
 ## Configuration Architecture
 
-All configuration in YAML, loaded into frozen dataclasses at startup.
+All configuration is YAML. The code loads it into frozen dataclasses at
+startup.
 
 ```
 config/
-  default.yaml     All settings with defaults
+  default.yaml     All parameters, with defaults
   species.yaml     Species taxonomy + model label index mapping
 ```
 
-Configuration hierarchy:
-1. Hardcoded defaults in dataclass definitions
-2. Overridden by YAML file values
-3. Config directory overridden by RATCATCHER_CONFIG_DIR env var
-4. CLI arguments override specific settings at runtime
+The configuration hierarchy:
+
+```mermaid
+flowchart LR
+    D["1. Defaults in<br/>the dataclasses"] --> Y["2. YAML file<br/>values"]
+    Y --> E["3. RATCATCHER_CONFIG_DIR<br/>selects the directory"]
+    E --> C["4. CLI arguments<br/>at runtime"]
+```
+
+Each step wins against the step before it.
 
 ## Platform Abstraction
 
-Two factory patterns provide cross-platform support:
+Four factory patterns give the cross-platform support.
 
 ### Camera Factory (camera/platform_camera.py)
-```
-source_type="auto" -> try Picamera2 -> fall back to WebcamSource
-source_type="file" -> FileSource (video file or image directory)
-source_type="webcam" -> WebcamSource (OpenCV VideoCapture)
-source_type="picamera" -> PicameraSource (Picamera2, RPi only)
+
+```mermaid
+flowchart LR
+    A["source_type=auto"] --> P["Picamera2"]
+    P -- "not available" --> W["WebcamSource"]
+    F["source_type=file"] --> FS["FileSource<br/>video file or image directory"]
+    WB["source_type=webcam"] --> WS["WebcamSource<br/>OpenCV VideoCapture"]
+    PC["source_type=picamera"] --> PS["PicameraSource<br/>RPi only"]
 ```
 
 ### Detection Factory (detection/factory.py)
-```
-backend="auto" -> try Hailo -> try NCNN -> fall back to OpenCV DNN
-backend="hailo" -> HailoDetector (RPi + Hailo-8L only)
-backend="ncnn" -> NCNNDetector (requires ncnn Python package)
-backend="opencv_dnn" -> OpenCVDetector (always available)
+
+```mermaid
+flowchart LR
+    A["backend=auto"] --> H["Hailo"]
+    H -- "not available" --> N["NCNN"]
+    N -- "not available" --> O["OpenCV DNN"]
+    HB["backend=hailo"] --> HD["HailoDetector<br/>RPi + Hailo-8L only"]
+    NB["backend=ncnn"] --> ND["NCNNDetector<br/>needs the ncnn package"]
+    OB["backend=opencv_dnn"] --> OD["OpenCVDetector<br/>always available"]
 ```
 
 ### Audio Factory (audio/factory.py)
-```
-source_type="auto" -> try ArecordSource (ALSA) -> fall back to WavFileSource
-source_type="alsa" -> ArecordSource (requires arecord and an I2S device)
-source_type="file" -> WavFileSource (16/24/32-bit WAV)
+
+```mermaid
+flowchart LR
+    A["source_type=auto"] --> AR["ArecordSource (ALSA)"]
+    AR -- "not available" --> WF["WavFileSource"]
+    AL["source_type=alsa"] --> ARS["ArecordSource<br/>needs arecord and an I2S device"]
+    FI["source_type=file"] --> WFS["WavFileSource<br/>16/24/32-bit WAV"]
 ```
 
-All three factories use lazy imports so unavailable backends don't cause
-import errors.
+### Display Factory (display/factory.py)
+
+```mermaid
+flowchart LR
+    A["source_type=auto"] --> SP["SerialPanel"]
+    SP -- "no panel answers" --> NP["NullPanel"]
+    SE["source_type=serial"] --> SPS["SerialPanel<br/>pyserial; port auto examines each port"]
+    FI["source_type=file"] --> FP["FilePanel<br/>frames appended to a file"]
+    NU["source_type=null"] --> NPS["NullPanel<br/>accepts frames, discards them"]
+```
+
+This factory is the only one with an "auto" path that always succeeds.
+The other three stop with an error, because a camera or a detector that
+is not available means the system cannot do its work. A panel that is not
+available means only that no person sees the summary. Thus the display
+factory uses a null panel, and the pipeline continues.
+
+Port detection is also the only one that needs a handshake and not an
+identifier. The CrowPanel shows a plain CH340 descriptor
+(`1a86:7522`). Many other development boards show the same descriptor.
+Thus the factory sends a ping to each candidate port, and keeps the one
+that answers with a `hello`. The factory examines only the known USB
+serial bridges. It writes a byte to each port that it opens, and the
+machine can have serial devices that belong to something else.
+
+All four factories use lazy imports. Thus a backend that is not
+available causes no import error.
 
 ## Training Pipeline (Desktop CUDA)
 
-The `training/` directory contains a self-contained pipeline for
-training custom detection models on a desktop GPU.
+The `training/` directory has a self-contained pipeline. It trains a
+custom detection model on a desktop GPU.
 
-```
-Open Images V7 (Google Cloud Storage)
-    |
-    v
-download_data.py  -- filter by class MID, download images + boxes
-    |                 Convert to YOLO format, split train/val
-    v
-datasets/ratcatcher/
-  train/images/ + labels/
-  val/images/ + labels/
-  dataset.yaml
-    |
-    v
-train_detector.py  -- Ultralytics YOLO fine-tuning on CUDA
-    |                  Start from yolov8n.pt (COCO pretrained)
-    v
-runs/train/ratcatcher/weights/best.pt
-    |
-    v
-export_model.py  -- Export to ONNX, NCNN, or Hailo HEF
-    |
-    v
-models/ratcatcher_best.onnx  -- Deploy to RPi
+```mermaid
+flowchart TB
+    OI["Open Images V7<br/>Google Cloud Storage"]
+    DD["download_data.py<br/>filter by class MID<br/>download images + boxes<br/>convert to YOLO, split train/val"]
+    DS["datasets/ratcatcher/<br/>train/images + labels<br/>val/images + labels<br/>dataset.yaml"]
+    TD["train_detector.py<br/>Ultralytics YOLO on CUDA<br/>start from yolov8n.pt"]
+    BW["runs/train/ratcatcher/<br/>weights/best.pt"]
+    EM["export_model.py<br/>export to ONNX or NCNN"]
+    ON["models/ratcatcher_best.onnx"]
+    BH["build_hef.py<br/>x86-64 only"]
+    HEF["models/ratcatcher_best.hef"]
+
+    OI --> DD --> DS --> TD --> BW --> EM --> ON
+    ON --> BH --> HEF
 ```
 
-**Data sources:** Open Images V7 with direct HTTP downloads from S3.
-No API keys, no heavy dependencies. Images filtered by class MID codes
-and quality flags (exclude groups, depictions, occluded).
+**Data sources:** Open Images V7, with direct HTTP downloads from S3.
+No API keys, and no large dependencies. A class MID code and the
+quality flags filter the images (this excludes groups, depictions and
+occluded objects).
 
-**Training:** Ultralytics YOLOv8 with PyTorch CUDA. 100 epochs,
-early stopping, mosaic augmentation. Results: mAP@0.5 = 0.751 on
-~10K images across 5 classes.
+**Training:** Ultralytics YOLOv8 with PyTorch CUDA. 100 epochs, a stop
+when the result does not get better, and mosaic augmentation. Result: mAP@0.5 = 0.751 on ~10K images
+across 5 classes.
 
-**Custom model detection:** Backends auto-detect 5-class models by
-probing output tensor shape at load time (OpenCV DNN) or at inference
-time (NCNN, Hailo). If output has 9 values per detection (4 box + 5
-class scores), COCO remapping is skipped.
+**Custom model detection:** the backends find a 5-class model
+automatically. They examine the output tensor shape at load time
+(OpenCV DNN) or at inference time (NCNN, Hailo). If the output has 9
+values for each detection (4 box + 5 class scores), the code does no
+COCO remap.
 
 ## Memory Budget (4GB RPi5)
 
@@ -407,25 +482,25 @@ class scores), COCO remapping is skipped.
 | BirdNET (TFLite FP32, 52 MB weights) | ~156 MB (measured) |
 | Frame buffers (2 cameras) | ~200 MB |
 | Audio window buffers (2 channels) | ~10 MB |
-| SQLite + Python overhead | ~150 MB |
+| SQLite + Python | ~150 MB |
 | **Total** | **~1.4 GB** |
 
-Headroom: ~2.6 GB free on a 4 GB system running headless. BirdNET is the
-single largest model in the system by file size -- it is FP32 where the
-two vision models are quantized.
+Approximately 2.6 GB stays free on a 4 GB headless system. BirdNET is
+the largest model file in the system, because it is FP32 and the two
+vision models are quantized.
 
 ## Deployment
 
 ### Systemd Service
-- Auto-start on boot with `ratcatcher.service`
-- Restart on failure (10s delay)
-- Watchdog timer (60s)
-- Memory limit: 3 GB (prevents OOM-killing other services)
-- Security hardening: NoNewPrivileges, ProtectSystem=strict
+- Auto-start at boot with `ratcatcher.service`
+- Restart after a failure (10 s delay)
+- Watchdog timer (60 s)
+- Memory limit: 3 GB (this prevents an OOM kill of other services)
+- Security: NoNewPrivileges, ProtectSystem=strict
 
 ### Outdoor Considerations
-- IR-Cut cameras for day/night operation
-- UPS HAT for power resilience
+- IR-Cut cameras for day and night operation
+- UPS HAT for power failures
 - IP65 enclosure with Gore-Tex vents
-- Active cooling (RPi5 throttles at 80C)
-- Nightly scheduled reboot for long-term stability
+- An active cooler (the RPi5 throttles at 80 C)
+- A scheduled reboot each night, to prevent long-term problems
