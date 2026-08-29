@@ -182,10 +182,25 @@ def test_birdnet_rodent_genus_is_counted_as_a_rodent(db: DetectionDatabase) -> N
     assert counts.bird.heard == 0
 
 
+def test_unmatched_audio_windows_are_not_counted(db: DetectionDatabase) -> None:
+    """A window BirdNET could not identify is a recording, not a bird."""
+    now = datetime.now()
+    for _ in range(9):
+        db.insert_audio_detection(
+            timestamp=now.isoformat(), channel=0, species=None, common_name=None
+        )
+    add_audio(db, "Junco hyemalis", now, count=2)
+
+    counts = get_category_counts(db)
+
+    assert counts.bird.heard == 2
+    assert counts.total == 2
+
+
 def test_categorize_handles_an_unknown_detector_class() -> None:
     assert categorize("video", "porcupine", None) == "other"
     assert categorize("video", None, None) is None
-    assert categorize("audio", None, None) == "bird"
+    assert categorize("audio", None, None) is None
 
 
 def test_today_window_excludes_yesterday(db: DetectionDatabase, config: Config) -> None:
@@ -234,6 +249,26 @@ def test_frame_reports_the_last_sighting_from_either_sense(
     assert frame.last is not None
     assert frame.last.name == "Dark-eyed Junco"
     assert frame.last.sense == "ear"
+
+
+def test_last_sighting_skips_windows_that_named_no_species(
+    db: DetectionDatabase, config: Config
+) -> None:
+    """The view calls every audio row 'bird'. An unnamed one must not show."""
+    now = datetime.now()
+    add_audio(db, "Junco hyemalis", now - timedelta(hours=1), common_name="Dark-eyed Junco")
+    for minute in range(9):
+        db.insert_audio_detection(
+            timestamp=(now - timedelta(minutes=minute)).isoformat(),
+            channel=0,
+            species=None,
+            common_name=None,
+        )
+
+    frame = build_status_frame(db, config, now=now)
+
+    assert frame.last is not None
+    assert frame.last.name == "Dark-eyed Junco"
 
 
 def test_frame_has_no_last_sighting_on_an_empty_database(
@@ -692,3 +727,48 @@ def test_engine_drives_a_real_serial_panel(
         assert frame["full"] == 1
     finally:
         engine.stop()
+
+
+def test_categorize_excludes_non_avian_audio_labels() -> None:
+    """BirdNET names insects, frogs and mammals; none are feeder visitors.
+
+    The two crickets below are what the microphones actually heard on
+    the evening of 2026-08-28: 145 windows, every one of them counted
+    as a bird before this exclusion existed.
+    """
+    assert categorize("audio", "bird", "Allonemobius tinnulus") is None
+    assert categorize("audio", "bird", "Phyllopalpus pulchellus") is None
+    assert categorize("audio", "bird", "Oecanthus fultoni") is None
+    assert categorize("audio", "bird", "Pseudacris regilla") is None
+    assert categorize("audio", "bird", "Scaphiopus couchii") is None
+    assert categorize("audio", "bird", "Canis latrans") is None
+    assert categorize("audio", "bird", "Alouatta pigra") is None
+
+
+def test_categorize_still_counts_birds_and_rodents() -> None:
+    """The exclusion must not swallow the taxa the system exists to report."""
+    assert categorize("audio", "bird", "Junco hyemalis") == "bird"
+    assert categorize("audio", "bird", "Otus lettia") == "bird"
+    assert categorize("audio", "bird", "Rattus norvegicus") == "rodent"
+    assert categorize("audio", "bird", "Sciurus griseus") == "rodent"
+
+
+def test_categorize_does_not_confuse_birds_named_after_insects() -> None:
+    """Common-name matching would misfile these; genus matching does not."""
+    assert categorize("audio", "bird", "Ammodramus savannarum") == "bird"
+    assert categorize("audio", "bird", "Edolisoma tenuirostre") == "bird"
+    assert categorize("audio", "bird", "Spiloptila clamans") == "bird"
+    assert categorize("audio", "bird", "Piaya cayana") == "bird"
+
+
+def test_non_avian_audio_is_excluded_from_counts(db: DetectionDatabase) -> None:
+    """A night of crickets must not read as a night of birds."""
+    now = datetime.now().replace(hour=21, minute=0, second=0, microsecond=0)
+    add_audio(db, "Allonemobius tinnulus", now, count=145)
+    add_audio(db, "Junco hyemalis", now, count=3)
+
+    counts = get_category_counts(db)
+
+    assert counts.bird.heard == 3
+    assert counts.other.heard == 0
+    assert counts.total == 3

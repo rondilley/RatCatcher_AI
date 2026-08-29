@@ -1,17 +1,58 @@
 [Unit]
 Description=RatCatcher AI Wildlife Detection
-After=network.target
+Documentation=file:/usr/share/doc/ratcatcher/DEPLOYMENT.md
+After=network.target ratcatcher-firstboot.service
 Wants=network-online.target
+# Give up rather than loop forever on a permanent fault.
+#
+# Restart=on-failure with RestartSec=10 retries every 10 seconds, and a
+# missing camera or an unseated ribbon never fixes itself. Each attempt
+# reloads TFLite and opens the NPU, so an unattended Pi would burn power
+# on that indefinitely and the journal would scroll the real first error
+# out of reach. systemd's stock limit does not catch this: the default
+# window is 10 s and RestartSec is also 10 s, so the counter never fills
+# -- observed here reaching "restart counter is at 5" and continuing.
+# Five failures in five minutes means the hardware is absent, not busy:
+# stop, stay failed, and let systemctl status say so plainly.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
 User=ratcatcher
-Group=video
+Group=ratcatcher
 WorkingDirectory=/opt/ratcatcher
-ExecStart=/opt/ratcatcher/.venv/bin/ratcatcher run --config /opt/ratcatcher/config/default.yaml
+# WorkingDirectory matters: the detector and classifier resolve their
+# weights as a relative "models/..." path, so it must be the directory
+# holding models/.
+Environment=RATCATCHER_CONFIG_DIR=/etc/ratcatcher
+# Turn HailoRT's file logging off. It is duplicate output, and the copy
+# it insists on writing cannot be redirected.
+#
+# HailoRT keeps two logs. The local one honours HAILORT_LOGGER_PATH,
+# which is what an earlier revision pointed at /var/log/ratcatcher. The
+# global one is fixed at $HOME/.hailo/hailort and ignores that variable
+# entirely, so the redirect silenced nothing: every start still logged
+#
+#   Failed checking path /opt/ratcatcher/.hailo/hailort access
+#   permissions, errno = 30
+#
+# errno 30 is EROFS, not EACCES. This is not a mode-bits problem and
+# chowning the directory does not fix it -- ProtectSystem=strict mounts
+# /opt/ratcatcher read-only for this service and ReadWritePaths carves
+# out only data/. The hailort.log sitting in that directory, owned by
+# ratcatcher and group-writable, was left by a run outside the sandbox
+# and is exactly the red herring it looks like.
+#
+# NONE is the documented sentinel and the only value that suppresses
+# the global log; verified against libhailort 4.23.0 by running
+# hailortcli with a read-only HOME. Nothing is lost: HailoRT still
+# writes to the console, which is journal here, and from there to
+# syslog like every other record this service emits.
+Environment=HAILORT_LOGGER_PATH=NONE
+ExecStart=/opt/ratcatcher/.venv/bin/ratcatcher run --config /etc/ratcatcher/default.yaml
 Restart=on-failure
 RestartSec=10
-WatchdogSec=60
 
 StandardOutput=journal
 StandardError=journal
@@ -26,11 +67,21 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ReadWritePaths=/opt/ratcatcher/data /var/log/ratcatcher
 ProtectHome=true
+# ProtectSystem=strict leaves /tmp read-only. FFmpeg writes there while
+# muxing a clip, so give the service a private writable /tmp of its own.
+PrivateTmp=true
 
-# Camera and Hailo device access
-SupplementaryGroups=video i2c gpio
-DeviceAllow=/dev/video* rw
-DeviceAllow=/dev/hailo* rw
+# Device access.
+#
+# Access is controlled by group membership, not by a DeviceAllow list.
+# An earlier revision carried DeviceAllow=/dev/video* and /dev/hailo*:
+# systemd does not accept globs there, so those lines were dropped as
+# malformed -- and merely having a DeviceAllow list flips DevicePolicy
+# from permissive to restrictive, which would have denied the cameras
+# every device they need. Picamera2 alone touches /dev/video*,
+# /dev/media*, /dev/dma_heap/* and /dev/v4l-subdev*; enumerating them
+# correctly buys nothing over the group check that already gates them.
+SupplementaryGroups=video i2c gpio audio dialout
 
 [Install]
 WantedBy=multi-user.target

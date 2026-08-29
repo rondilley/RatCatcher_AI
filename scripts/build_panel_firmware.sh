@@ -7,24 +7,54 @@
 # The board ships with an Elecrow demo that ignores the serial port. It
 # must be replaced before the panel can show anything from RatCatcher.
 # This script installs arduino-cli, the ESP32 core and ArduinoJson into
-# a directory inside the repository, fetches Elecrow's e-paper driver
-# files, and compiles.
+# a build tree of its own, fetches Elecrow's e-paper driver files, and
+# compiles.
 #
 # The driver files are Elecrow's, not ours. They are downloaded here
 # rather than kept in this repository, in the same way that the BirdNET
 # weights are, so their terms stay with their author.
 #
+# It runs from a repository checkout and from an installed package
+# alike. See "Build tree" below for where each one puts its files.
+#
 # Usage:
-#   ./scripts/build_panel_firmware.sh                    # compile only
-#   ./scripts/build_panel_firmware.sh --upload           # compile and flash
-#   ./scripts/build_panel_firmware.sh --upload --port /dev/ttyUSB0
-#   ./scripts/build_panel_firmware.sh --clean            # start again
+#   build_panel_firmware.sh                    # compile only
+#   build_panel_firmware.sh --upload           # compile and flash
+#   build_panel_firmware.sh --upload --port /dev/ttyUSB0
+#   build_panel_firmware.sh --clean            # start again
 #
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-FIRMWARE_DIR="${REPO_ROOT}/firmware"
-SKETCH_DIR="${FIRMWARE_DIR}/ratcatcher_panel"
+# --------------------------------------------------------------------
+# Build tree
+# --------------------------------------------------------------------
+#
+# Two layouts. A repository checkout keeps everything under firmware/,
+# which .gitignore already covers. An installed package cannot: this
+# script sits in /opt/ratcatcher/lib/ and the sketch in
+# /opt/ratcatcher/firmware/, both root-owned and both dpkg's, while a
+# build writes about 2.3 GB of ESP32 toolchain plus the downloaded
+# Elecrow driver files. That would need root and would leave files
+# behind that dpkg knows nothing about. So an installed run builds in
+# the invoking user's cache directory, with the sketch copied there.
+#
+# pyproject.toml is the marker for a checkout. Testing whether
+# firmware/ is writable would not do: under sudo /opt/ratcatcher is
+# writable too, and the 2.3 GB would land in the package directory.
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PREFIX="$(dirname "${SELF_DIR}")"
+
+if [[ -f "${PREFIX}/pyproject.toml" ]]; then
+    FIRMWARE_DIR="${PREFIX}/firmware"
+    SKETCH_SRC="${FIRMWARE_DIR}/ratcatcher_panel"
+    SKETCH_DIR="${SKETCH_SRC}"
+else
+    SKETCH_SRC="${PREFIX}/firmware/ratcatcher_panel"
+    FIRMWARE_DIR="${XDG_CACHE_HOME:-${HOME}/.cache}/ratcatcher-panel"
+    SKETCH_DIR="${FIRMWARE_DIR}/ratcatcher_panel"
+fi
+
 TOOLS_DIR="${FIRMWARE_DIR}/.arduino"
 BUILD_DIR="${FIRMWARE_DIR}/build"
 
@@ -43,7 +73,7 @@ DO_UPLOAD=0
 DO_CLEAN=0
 
 usage() {
-    sed -n '2,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0
 }
 
@@ -80,6 +110,19 @@ fi
 
 need uname
 need tar
+
+# --------------------------------------------------------------------
+# Sketch
+# --------------------------------------------------------------------
+
+[[ -f "${SKETCH_SRC}/ratcatcher_panel.ino" ]] \
+    || die "No sketch at ${SKETCH_SRC}/ratcatcher_panel.ino"
+
+if [[ "${SKETCH_DIR}" != "${SKETCH_SRC}" ]]; then
+    log "Building in ${FIRMWARE_DIR}"
+    mkdir -p "${SKETCH_DIR}"
+    cp -f "${SKETCH_SRC}/ratcatcher_panel.ino" "${SKETCH_DIR}/"
+fi
 
 # --------------------------------------------------------------------
 # arduino-cli

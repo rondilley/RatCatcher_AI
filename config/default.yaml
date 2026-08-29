@@ -116,9 +116,11 @@ audio:
   #
   # Both mics share one I2S bus and are separated by their SEL pin, so the
   # OS presents them as ONE stereo capture device: channel 0 is the left
-  # mic (SEL to GND), channel 1 the right (SEL to 3.3V). Enabling this
-  # requires: sudo ./scripts/enable_i2s_mics.sh followed by a reboot.
-  enabled: false
+  # mic (SEL to GND), channel 1 the right (SEL to 3.3V). This requires
+  # sudo ./scripts/enable_i2s_mics.sh followed by a reboot; without the
+  # overlay there is no capture device and the audio engine reports the
+  # failure and stands down, leaving the cameras running.
+  enabled: true
 
   # "auto" (alsa, falling back to file), "alsa", or "file"
   source_type: "auto"
@@ -184,7 +186,10 @@ display:
   # It needs the RatCatcher firmware. The board ships with an Elecrow
   # demo that ignores the serial port. Flash it with:
   #   ./scripts/build_panel_firmware.sh --port /dev/ttyUSB0 --upload
-  enabled: false
+  #
+  # Safe to leave on with no panel attached: source_type "auto" falls
+  # back to a null panel, which the pipeline drives and discards.
+  enabled: true
 
   # "auto" (serial, falling back to no panel), "serial", "file", "null"
   source_type: "auto"
@@ -234,6 +239,50 @@ alerts:
   cooldown_seconds: 300
   # Alert methods (future: email, mqtt, webhook)
   methods: []
+
+syslog:
+  # Detection and status reporting to syslog.
+  #
+  # Two kinds of line are sent, both in logfmt (key=value), so a log
+  # aggregator can extract fields without a regex per message shape:
+  #
+  #   detection modality=video camera=0 class=squirrel confidence=0.87
+  #   status window=today bird_seen=12 bird_heard=31 cameras=2 npu=yes
+  #
+  # Nothing else goes to syslog. libcamera's pixel format warnings and
+  # picamera2's startup chatter stay in journald, because a forwarded
+  # stream is the one view of this system an operator has when the Pi
+  # itself is out of reach, and it is worth keeping narrow.
+  #
+  # Turning this off silences the socket, not the record: the lines
+  # still reach journald, where they were not visible before.
+  enabled: true
+
+  # A path is a local syslog socket. "host:port" is a remote loghost;
+  # a bare hostname is rejected rather than given a default port, so a
+  # typo cannot quietly ship detections somewhere unintended.
+  address: "/dev/log"
+  # Transport for a remote loghost. Ignored for a socket path.
+  protocol: "udp"
+  # local0 rather than daemon: this is application output, and keeping
+  # it off daemon lets rsyslog route feeder detections into their own
+  # file without catching every other service on the Pi.
+  facility: "local0"
+  # The tag the lines carry, which is what "journalctl -t" matches.
+  ident: "ratcatcher"
+
+  # One line per stored detection.
+  detections: true
+
+  # Seconds between status lines. Far longer than the panel's refresh:
+  # the panel redraws to stay readable at a glance, while this exists to
+  # prove the system is alive and carry counts, and one line every five
+  # minutes does that without filling a loghost with a record that
+  # barely changes.
+  status_interval_seconds: 300
+  # Counting window: "today" (since local midnight), "24h", or "all".
+  # Matches display.window above so the panel and the log agree.
+  status_window: "today"
 
 monitoring:
   # System health check interval in seconds

@@ -183,9 +183,8 @@ def _get_version() -> str:
     return __version__
 
 
-def _parse_time_window(window: str) -> str:
-    """Convert a time window string like '24h' or '7d' to an ISO timestamp."""
-    now = datetime.now()
+def _parse_time_window(window: str) -> float:
+    """Convert a time window string like '24h' or '7d' to a number of hours."""
     value = int(window[:-1])
     unit = window[-1].lower()
     if unit == "h":
@@ -196,7 +195,7 @@ def _parse_time_window(window: str) -> str:
         delta = timedelta(weeks=value)
     else:
         raise ValueError(f"Unknown time unit: {unit}. Use h, d, or w.")
-    return (now - delta).isoformat()
+    return delta.total_seconds() / 3600.0
 
 
 def _setup_logging(level: str = "INFO") -> None:
@@ -218,6 +217,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
         return 1
 
     _setup_logging(config.system.log_level)
+
+    # Before anything can detect, so the first detection has somewhere
+    # to go. A syslog socket that cannot be opened is reported and then
+    # ignored; the lines still reach journald either way.
+    from ratcatcher.monitoring.events import configure_event_log
+
+    configure_event_log(config.syslog)
 
     if args.source is not None:
         cameras = []
@@ -312,6 +318,27 @@ def _cmd_run(args: argparse.Namespace) -> int:
     else:
         print("Display: disabled")
 
+    # Independent for the same reason the panel is. It reports on the
+    # system, so a reporting fault that stopped the cameras would be the
+    # worst possible failure mode.
+    status_reporter = None
+    if config.syslog.enabled:
+        from ratcatcher.monitoring.reporter import StatusReporter
+
+        status_reporter = StatusReporter(config)
+        try:
+            status_reporter.set_state(
+                cameras=sum(1 for camera in config.cameras if camera.enabled),
+                audio_active=audio_engine is not None,
+            )
+            status_reporter.start()
+            print(f"Syslog: reporting to {config.syslog.address}")
+        except (RuntimeError, OSError) as exc:
+            print(f"WARNING: syslog status disabled -- {exc}", file=sys.stderr)
+            status_reporter = None
+    else:
+        print("Syslog: disabled")
+
     try:
         engine.start(
             camera_ids=args.cameras,
@@ -324,6 +351,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         engine.stop()
     finally:
+        if status_reporter is not None:
+            status_reporter.stop()
         if display_engine is not None:
             display_engine.stop()
         if audio_engine is not None:
@@ -335,12 +364,15 @@ def _cmd_run(args: argparse.Namespace) -> int:
         print(f"Audio stats:   {audio_engine.stats}")
     if display_engine is not None:
         print(f"Panel stats:   {display_engine.stats}")
+    if status_reporter is not None:
+        print(f"Syslog stats:  {status_reporter.stats}")
     return 0
 
 
 def _cmd_stats(args: argparse.Namespace) -> int:
     """Show detection statistics from the database."""
     from ratcatcher.config import load_config
+    from ratcatcher.monitoring.stats import format_stats, get_stats
     from ratcatcher.storage.database import DetectionDatabase
 
     if args.db is not None:
@@ -356,29 +388,22 @@ def _cmd_stats(args: argparse.Namespace) -> int:
         print(f"Database not found: {db_path}", file=sys.stderr)
         return 1
 
-    since = None
+    hours = None
     if args.last is not None:
         try:
-            since = _parse_time_window(args.last)
+            hours = _parse_time_window(args.last)
         except ValueError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 1
 
+    label = f"last {args.last}" if args.last else "all time"
+
     with DetectionDatabase(db_path) as db:
-        total = db.get_detection_count(since=since)
-        counts = db.get_species_counts(since=since)
+        stats = get_stats(db, hours=hours, label=label)
 
-    window_label = f"last {args.last}" if args.last else "all time"
-    print(f"Detection Statistics ({window_label})")
-    print(f"{'=' * 50}")
-    print(f"Total detections: {total}")
-
-    if counts:
-        print(f"\nBy species:")
-        for species_name, count in counts.items():
-            print(f"  {species_name}: {count}")
-    else:
-        print("No detections recorded.")
+    print(format_stats(stats))
+    if stats.total_detections == 0:
+        print("\nNo detections recorded.")
 
     return 0
 

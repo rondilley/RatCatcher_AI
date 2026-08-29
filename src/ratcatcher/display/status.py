@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from ratcatcher.config import Config
 from ratcatcher.display.protocol import LastSighting, StatusFrame, SystemStatus
 from ratcatcher.monitoring.health import HealthReport, check_health
-from ratcatcher.monitoring.stats import get_category_counts
+from ratcatcher.monitoring.stats import categorize, get_category_counts
 from ratcatcher.storage.database import DetectionDatabase
 
 logger = logging.getLogger(__name__)
@@ -122,16 +122,25 @@ def last_sighting(
 
     Not restricted to the counting window. After a quiet night the last
     bird of yesterday is the useful thing to show, not a blank line.
+
+    Only rows the counter accepts are eligible. The unified view labels
+    every audio row "bird", so a window BirdNET could not identify would
+    otherwise fall through to that class name and hold the panel on a
+    bird nobody named.
     """
     moment = now if now is not None else datetime.now()
 
     try:
-        rows = db.get_all_detections(limit=8)
+        rows = db.get_all_detections(limit=32)
     except Exception as exc:  # noqa: BLE001 -- the panel must not crash on this
         logger.debug("Could not read the last sighting: %s", exc)
         return None
 
     for row in rows:
+        if categorize(
+            str(row.get("modality", "")), row.get("class_name"), row.get("species")
+        ) is None:
+            continue
         name = row.get("common_name") or row.get("species") or row.get("class_name")
         if not name:
             continue

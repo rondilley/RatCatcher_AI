@@ -93,6 +93,116 @@ sudo raspi-config
 
 ### Step 2: Install RatCatcher AI
 
+There are two routes. The package is the one to use for a real
+deployment; the git checkout is for working on the code.
+
+#### Route A -- the Debian package
+
+Build the package once, on any Pi 5 that has a checkout and the model
+files, then install that one artifact on every Pi you deploy.
+
+```bash
+# On the build Pi
+cd ~/RatCatcher_AI
+./scripts/build_deb.sh
+# -> dist/ratcatcher_0.1.0_arm64.deb
+
+# On the target Pi (copy the .deb across first)
+sudo apt-get install ./ratcatcher_0.1.0_arm64.deb
+```
+
+Use `apt-get install`, not `dpkg -i`. dpkg does not resolve
+dependencies; it will unpack the package, fail to configure it, and
+leave apt needing a `--fix-broken` run.
+
+Installing from a path inside your home directory prints this at the
+end:
+
+```
+N: Download is performed unsandboxed as root as file '...' couldn't be
+   accessed by user '_apt'. - pkgAcquire::Run (13: Permission denied)
+```
+
+That is a notice, not an error, and the install has already succeeded by
+the time it appears. Home directories are mode 0700 on Raspberry Pi OS,
+so the unprivileged `_apt` user cannot traverse into one; apt drops its
+download sandbox and copies the file as root instead. Copy the package
+somewhere world-readable first if you would rather not see it:
+
+```bash
+cp dist/ratcatcher_0.1.0_arm64.deb /tmp/
+sudo apt-get install /tmp/ratcatcher_0.1.0_arm64.deb
+```
+
+The line to actually check for is the last one dpkg prints for this
+package -- `Setting up ratcatcher (0.1.0) ...` followed by the
+`ratcatcher:` progress messages. Confirm afterwards with:
+
+```bash
+dpkg -s ratcatcher | grep Status     # expect: install ok installed
+```
+
+Installing does all of the following, so Steps 3 through 6 below are
+already done when it finishes:
+
+- Pulls the system dependencies, including `hailo-all`,
+  `python3-picamera2` and `dkms`
+- Creates the `ratcatcher` system account in the video, i2c, gpio,
+  audio and dialout groups
+- Builds `/opt/ratcatcher/.venv` and installs the Python packages from
+  wheels carried inside the package, with no network access
+- Writes the IMX477 camera and SPH0645 I2S overlays to
+  `/boot/firmware/config.txt`, backing the original up first to
+  `config.txt.ratcatcher-backup`
+- Downloads the BirdNET weights from Zenodo
+- Installs and enables the systemd units
+
+It does not start anything that needs the hardware, because the device
+tree overlays it just wrote are read by the firmware only at boot:
+
+```bash
+sudo reboot
+```
+
+On that boot, `ratcatcher-firstboot.service` runs once. It repairs the
+Hailo PCIe driver if a kernel upgrade has orphaned it, registers it with
+DKMS so that cannot happen again, retries the BirdNET download if the
+first attempt had no network, and then disables itself. Watch it with:
+
+```bash
+sudo journalctl -u ratcatcher-firstboot
+```
+
+Two things are deliberately NOT done by the package, because they need
+hardware that may not be attached: it does not flash the e-paper status
+panel (Step 6b), and it does not compile a HEF (that needs an x86
+machine; see "Compile the custom detector for the NPU"). The panel
+flashing tool itself is installed, at
+`/opt/ratcatcher/lib/build_panel_firmware.sh`, so Step 6b can be run
+later without a checkout of the repository.
+
+Afterwards:
+
+| Path | Holds |
+| --- | --- |
+| `/etc/ratcatcher/` | `default.yaml` and `species.yaml`. Registered as dpkg conffiles, so your edits survive an upgrade. |
+| `/opt/ratcatcher/models/` | Detector, species classifier and BirdNET weights. |
+| `/opt/ratcatcher/data/` | The SQLite database, clips, thumbnails and audio clips. |
+| `/opt/ratcatcher/.venv/` | The virtualenv. Rebuilt from scratch if Python is upgraded. |
+| `/var/log/ratcatcher/` | Log directory. |
+
+Upgrading is `sudo apt-get install ./ratcatcher_<newer>_arm64.deb`.
+Removing splits two ways on purpose: `sudo apt-get remove ratcatcher`
+takes out the software and leaves every detection, clip and config file
+in place, while `sudo apt-get purge ratcatcher` deletes the data
+directory, the configuration and the service account. Neither reverts
+`/boot/firmware/config.txt` -- other software may have come to depend on
+those overlays by then, and rewriting a machine's boot configuration
+during a package removal is not something a package should do. The
+pre-install copy is kept at `/boot/firmware/config.txt.ratcatcher-backup`.
+
+#### Route B -- a git checkout
+
 ```bash
 # Clone the repository
 git clone <repo-url> ~/RatCatcher_AI
@@ -193,6 +303,10 @@ Do not do this step if you have no panel. The board ships with an
 Elecrow demo that ignores the serial port. Thus you must flash it again
 before it can show data.
 
+Plug the panel into one of the four USB-A ports. The USB-C connector on
+a Pi 5 carries power in and no data, so a panel connected there lights
+up and never appears as a serial port.
+
 ```bash
 # The account needs write access to the serial port. This is effective
 # at the next login, so do it first.
@@ -202,9 +316,15 @@ sudo usermod -aG dialout $USER
 # Find the panel
 ratcatcher display --list-ports
 
-# Build and flash. The first build downloads approximately 500 MB of
-# ESP32 tools into firmware/.arduino/ and takes some minutes.
+# Build and flash. The first build downloads about 2.3 GB of ESP32
+# tools and takes some minutes.
+#
+# From a repository checkout, which builds in firmware/:
 ./scripts/build_panel_firmware.sh --upload --port /dev/ttyUSB0
+#
+# From a package install, which builds in ~/.cache/ratcatcher-panel/
+# because /opt/ratcatcher belongs to dpkg:
+/opt/ratcatcher/lib/build_panel_firmware.sh --upload --port /dev/ttyUSB0
 
 # Make sure that the panel answers and draws
 ratcatcher display --once
@@ -350,6 +470,53 @@ GROUP BY species ORDER BY seen + heard DESC;
 - [ ] Put the enclosure at a 15-30 degree angle, pointed down
 
 ## Troubleshooting
+
+### The service fails with "No cameras could be started"
+
+First establish whether this is ratcatcher's problem at all. It is not,
+if libcamera cannot see the cameras either:
+
+```bash
+rpicam-hello --list-cameras
+```
+
+`No cameras available!` means the sensors are not enumerated, and no
+amount of configuration inside ratcatcher will change that.
+
+The most common cause, immediately after installing the package, is
+simply that you have not rebooted yet. The install writes
+`dtoverlay=imx477` and `camera_auto_detect=0` to
+`/boot/firmware/config.txt`, and the firmware reads device tree overlays
+only at boot. Check what the running kernel actually booted with:
+
+```bash
+uptime -s                                   # when this kernel started
+stat -c %y /boot/firmware/config.txt        # when the overlays were written
+```
+
+If config.txt is newer than the boot, the overlays are not in effect:
+
+```bash
+sudo reboot
+```
+
+The explicit `dtoverlay=imx477` matters on Arducam boards. The UC-517
+B0270 is IMX477-based, and `camera_auto_detect` does not always
+recognise it -- a Pi that finds no cameras with auto-detect alone will
+often find both once the overlay is named outright.
+
+After five failed starts in five minutes the service stops retrying and
+stays in the failed state rather than looping. That is deliberate: a
+missing camera does not fix itself, and an endless retry would scroll
+the first real error out of the journal. Once the hardware is right:
+
+```bash
+sudo systemctl reset-failed ratcatcher
+sudo systemctl start ratcatcher
+```
+
+If the cameras are still missing after a reboot, it is wiring -- see
+below.
 
 ### The camera does not answer
 

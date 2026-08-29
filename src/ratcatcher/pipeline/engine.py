@@ -24,6 +24,7 @@ from ratcatcher.camera.capture import CameraSource
 from ratcatcher.camera.frame_buffer import FrameBuffer
 from ratcatcher.camera.platform_camera import create_camera
 from ratcatcher.config import Config
+from ratcatcher.monitoring.events import log_video_detection
 from ratcatcher.motion.detector import MotionDetector
 from ratcatcher.pipeline.event import DetectionEvent
 from ratcatcher.storage.clip_writer import ClipWriter
@@ -224,6 +225,29 @@ class PipelineEngine:
             t.join(timeout=5.0)
             if t.is_alive():
                 logger.warning("Thread %s did not stop within timeout", t.name)
+
+        # Release the NPU before the interpreter exits.
+        #
+        # HailoDetector holds a VDevice, a configured network group and
+        # its vstreams. Left to the garbage collector, that teardown
+        # runs during interpreter finalisation and segfaults: the
+        # process logged a clean "Pipeline stopped" and then died with
+        # SIGSEGV on every single stop, which made systemd report the
+        # unit as failed after an ordinary systemctl stop.
+        #
+        # Duck-typed rather than declared on the ObjectDetector
+        # protocol: only the Hailo backend owns a device, and the test
+        # that would let this be typed -- importing HailoDetector here
+        # to isinstance against it -- would pull hailo_platform into
+        # every platform that runs the pipeline.
+        if self._detector is not None:
+            close = getattr(self._detector, "close", None)
+            if close is not None:
+                try:
+                    close()
+                except Exception:
+                    logger.exception("Error closing object detector")
+            self._detector = None
 
         if self._db is not None:
             self._db.close()
@@ -514,5 +538,22 @@ class PipelineEngine:
                         self._stats["stored"] += 1
                 except Exception:
                     logger.exception("Failed to store detection")
+                else:
+                    # Only events that identified something. When
+                    # detection is disabled this loop also stores bare
+                    # motion events, which name no animal and would bury
+                    # the real sightings in a forwarded log.
+                    if event.class_name is not None:
+                        log_video_detection(
+                            camera=event.camera_id,
+                            class_name=event.class_name,
+                            species=event.species,
+                            common_name=event.common_name,
+                            confidence=event.confidence,
+                            species_confidence=event.species_confidence,
+                            pest=event.is_pest,
+                            clip_path=event.clip_path,
+                            thumbnail_path=event.thumbnail_path,
+                        )
 
         logger.info("Storage loop ended")

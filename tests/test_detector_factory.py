@@ -42,6 +42,35 @@ requires_custom_model = pytest.mark.skipif(
 CPU_BACKENDS = {"ncnn", "opencv_dnn"}
 
 
+@pytest.fixture
+def detector_factory():
+    """Create detectors and release them when the test ends.
+
+    The Hailo backend owns a VDevice, a configured network group and its
+    vstreams.  Dropping the last reference and leaving that to the
+    garbage collector segfaults the interpreter: on a Pi with a working
+    NPU the auto path returns Hailo here, and this file took the whole
+    suite down with SIGSEGV as the first test returned.  The same defect
+    killed the daemon on every shutdown; see PipelineEngine.stop().
+
+    Only the Hailo backend has a close(); the CPU backends hold no
+    device and the ObjectDetector protocol does not declare one.
+    """
+    created = []
+
+    def make(*args, **kwargs):
+        detector = create_detector(*args, **kwargs)
+        created.append(detector)
+        return detector
+
+    yield make
+
+    for detector in created:
+        close = getattr(detector, "close", None)
+        if close is not None:
+            close()
+
+
 def _config(**overrides) -> DetectionConfig:
     base = {
         "backend": "auto",
@@ -57,17 +86,17 @@ def _config(**overrides) -> DetectionConfig:
 @requires_custom_model
 class TestAutoSelection:
 
-    def test_auto_always_returns_a_usable_detector(self):
+    def test_auto_always_returns_a_usable_detector(self, detector_factory):
         """The regression test: auto must never raise, whatever the state
         of the NPU."""
-        detector = create_detector(_config(), models_dir=MODELS_DIR)
+        detector = detector_factory(_config(), models_dir=MODELS_DIR)
 
         assert detector.backend_name in CPU_BACKENDS | {"hailo"}
         assert detector.get_classes() == list(RATCATCHER_CLASSES)
 
-    def test_auto_selected_detector_runs_a_real_frame(self):
+    def test_auto_selected_detector_runs_a_real_frame(self, detector_factory):
         """A backend that constructs but cannot infer is no use."""
-        detector = create_detector(_config(), models_dir=MODELS_DIR)
+        detector = detector_factory(_config(), models_dir=MODELS_DIR)
 
         rng = np.random.default_rng(0)
         frame = rng.integers(0, 256, (480, 640, 3), dtype=np.uint8)
@@ -76,10 +105,10 @@ class TestAutoSelection:
         assert isinstance(result, list)
         assert all(isinstance(d, Detection) for d in result)
 
-    def test_auto_falls_back_when_no_hef_exists(self):
+    def test_auto_falls_back_when_no_hef_exists(self, detector_factory):
         """``model_path`` with no matching .hef must land on a CPU backend
         rather than raising FileNotFoundError out of the factory."""
-        detector = create_detector(_config(), models_dir=MODELS_DIR)
+        detector = detector_factory(_config(), models_dir=MODELS_DIR)
 
         if not (MODELS_DIR / "ratcatcher_best.hef").is_file():
             assert detector.backend_name in CPU_BACKENDS
@@ -88,8 +117,8 @@ class TestAutoSelection:
 @requires_custom_model
 class TestExplicitBackend:
 
-    def test_explicit_opencv_dnn_is_honoured(self):
-        detector = create_detector(
+    def test_explicit_opencv_dnn_is_honoured(self, detector_factory):
+        detector = detector_factory(
             _config(backend="opencv_dnn"), models_dir=MODELS_DIR
         )
         assert detector.backend_name == "opencv_dnn"

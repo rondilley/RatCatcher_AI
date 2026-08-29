@@ -6,16 +6,36 @@
 #
 # Usage:
 #   chmod +x scripts/download_models.sh
-#   ./scripts/download_models.sh
+#   ./scripts/download_models.sh [--birdnet-only] [MODELS_DIR]
+#
+# --birdnet-only fetches just the BirdNET song model. The Debian package
+# ships the detector and species classifier already, and needs only the
+# one model it may not redistribute, so it calls this script that way
+# rather than carrying a second copy of the download-and-verify logic.
 
 set -euo pipefail
 
-MODELS_DIR="${1:-models}"
+BIRDNET_ONLY=0
+MODELS_DIR=""
+for arg in "$@"; do
+    case "${arg}" in
+        --birdnet-only) BIRDNET_ONLY=1 ;;
+        -*)
+            echo "ERROR: unknown option: ${arg}" >&2
+            echo "Usage: $0 [--birdnet-only] [MODELS_DIR]" >&2
+            exit 2
+            ;;
+        *) MODELS_DIR="${arg}" ;;
+    esac
+done
+MODELS_DIR="${MODELS_DIR:-models}"
 mkdir -p "${MODELS_DIR}"
 
 echo "=== RatCatcher AI -- Model Download ==="
 echo "Output directory: ${MODELS_DIR}"
 echo ""
+
+if [ "${BIRDNET_ONLY}" -eq 0 ]; then
 
 # ---- YOLOv8n (Object Detection) ----
 
@@ -114,6 +134,8 @@ else
         echo "Compiler -- see: https://hailo.ai/developer-zone/"
     fi
 fi
+
+fi  # BIRDNET_ONLY
 
 # ---------------------------------------------------------------------------
 # BirdNET -- bird song identification from the I2S microphones

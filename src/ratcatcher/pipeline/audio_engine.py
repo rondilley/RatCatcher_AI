@@ -37,6 +37,7 @@ from ratcatcher.audio.clip_writer import clip_filename, write_wav
 from ratcatcher.audio.factory import create_audio_source
 from ratcatcher.audio.preprocess import DCBlocker, split_channels, to_mono
 from ratcatcher.config import Config
+from ratcatcher.monitoring.events import log_audio_detection
 from ratcatcher.storage.database import DetectionDatabase
 
 logger = logging.getLogger(__name__)
@@ -443,6 +444,19 @@ class AudioEngine:
             self._stats["identifications"] += 1
 
         if best is not None:
+            # Only windows that named a species. One that passed the
+            # gate and matched nothing identifies no bird, and at gate
+            # rates those would bury the real songs in a forwarded log.
+            log_audio_detection(
+                channel=channel,
+                species=best.scientific_name,
+                common_name=best.common_name,
+                confidence=best.confidence,
+                rms_dbfs=activity.band_rms_dbfs,
+                flatness=activity.spectral_flatness,
+                peak_hz=activity.peak_frequency_hz,
+                clip_path=clip_path,
+            )
             logger.info(
                 "Song identified on channel %d: %s (%.1f%%)",
                 channel,

@@ -30,8 +30,8 @@
 #        scp pi:RatCatcher_AI/models/calibration_set.npy models/
 #
 # Usage:
-#   ./scripts/build_hef.sh                 # defaults to hailo8l
-#   HAILO_ARCH=hailo8 ./scripts/build_hef.sh
+#   ./scripts/build_hef.sh                 # defaults to hailo8
+#   HAILO_ARCH=hailo8l ./scripts/build_hef.sh
 #   CALIB_COUNT=1024 ./scripts/build_hef.sh
 
 set -euo pipefail
@@ -39,10 +39,13 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO_ROOT}"
 
-# A hailo8l HEF runs on a Hailo-8, but a hailo8 HEF will NOT load on a
-# Hailo-8L, so hailo8l is the safe default.  Read the real value off the
-# Pi with: hailortcli fw-control identify
-HAILO_ARCH="${HAILO_ARCH:-hailo8l}"
+# The board here is a Hailo-8, confirmed with
+# 'hailortcli fw-control identify' (Device Architecture: HAILO8), so
+# hailo8 is the default.  An 8L HEF loads on a Hailo-8 and merely runs
+# slower -- HailoRT says so on every load -- but the reverse does not
+# hold: a hailo8 HEF will NOT load on a Hailo-8L.  Build with
+# HAILO_ARCH=hailo8l for a board of the smaller kind.
+HAILO_ARCH="${HAILO_ARCH:-hailo8}"
 CALIB_COUNT="${CALIB_COUNT:-256}"
 ONNX="${ONNX:-models/ratcatcher_best.onnx}"
 CALIB="${CALIB:-models/calibration_set.npy}"

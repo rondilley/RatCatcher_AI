@@ -58,8 +58,8 @@ std 255 is compiled into the HEF so the division happens on the NPU.
 Change one without the other and every detection score collapses.
 
 Usage:
-    python training/build_hef.py --hw-arch hailo8l
-    python training/build_hef.py --hw-arch hailo8 --calib models/calibration_set.npy
+    python training/build_hef.py --hw-arch hailo8
+    python training/build_hef.py --hw-arch hailo8l --calib models/calibration_set.npy
 """
 
 from __future__ import annotations
@@ -120,7 +120,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--hw-arch",
         type=str,
-        default="hailo8l",
+        default="hailo8",
         choices=["hailo8", "hailo8l"],
         help=(
             "Target NPU. Read it off 'hailortcli fw-control identify' on "

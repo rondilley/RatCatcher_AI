@@ -178,12 +178,14 @@ class TestDetectionDatabase:
             for _ in range(3):
                 db.insert_detection(
                     timestamp="2025-05-25T10:00:00", camera_id=0,
-                    stage="classification", species="rattus_norvegicus",
+                    stage="classification", class_name="rat",
+                    species="rattus_norvegicus",
                 )
             for _ in range(2):
                 db.insert_detection(
                     timestamp="2025-05-25T10:00:00", camera_id=0,
-                    stage="classification", species="parus_major",
+                    stage="classification", class_name="bird",
+                    species="parus_major",
                 )
 
             counts = db.get_species_counts()
@@ -192,8 +194,27 @@ class TestDetectionDatabase:
         finally:
             db.close()
 
+    def test_species_counts_ignore_motion_that_named_nothing(self, tmp_path: Path):
+        """Motion rows carry no class name and are not detections."""
+        db_path = tmp_path / "det.db"
+        db = DetectionDatabase(db_path)
+        try:
+            db.insert_detection(
+                timestamp="2025-05-25T10:00:00", camera_id=0,
+                stage="classification", class_name="bird",
+                species="parus_major",
+            )
+            db.insert_detection(
+                timestamp="2025-05-25T10:01:00", camera_id=0, stage="motion",
+            )
+
+            counts = db.get_species_counts()
+            assert counts == {"parus_major": 1}
+        finally:
+            db.close()
+
     def test_get_detection_count(self, tmp_path: Path):
-        """get_detection_count should reflect total rows inserted."""
+        """get_detection_count should count rows that identified something."""
         db_path = tmp_path / "det.db"
         db = DetectionDatabase(db_path)
         try:
@@ -203,10 +224,28 @@ class TestDetectionDatabase:
                 db.insert_detection(
                     timestamp=f"2025-05-25T10:0{i}:00",
                     camera_id=0,
-                    stage="motion",
+                    stage="detection",
+                    class_name="squirrel",
                 )
 
             assert db.get_detection_count() == 5
+        finally:
+            db.close()
+
+    def test_detection_count_excludes_motion(self, tmp_path: Path):
+        """A stored motion frame is a sample, not a sighting."""
+        db_path = tmp_path / "det.db"
+        db = DetectionDatabase(db_path)
+        try:
+            for i in range(5):
+                db.insert_detection(
+                    timestamp=f"2025-05-25T10:0{i}:00",
+                    camera_id=0,
+                    stage="motion",
+                )
+
+            assert db.get_detection_count() == 0
+            assert len(db.get_detections()) == 5
         finally:
             db.close()
 
@@ -217,7 +256,8 @@ class TestDetectionDatabase:
             db.insert_detection(
                 timestamp="2025-05-25T10:00:00",
                 camera_id=0,
-                stage="motion",
+                stage="detection",
+                class_name="bird",
             )
             assert db.get_detection_count() == 1
 

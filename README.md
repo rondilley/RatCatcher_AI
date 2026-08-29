@@ -114,6 +114,46 @@ venv/bin/ratcatcher stats --last 24h
 
 ## Quick Start (Raspberry Pi 5)
 
+### From a package (recommended)
+
+Build the `.deb` once on a Pi, then install it on as many as you like.
+It carries the detector and species classifier weights and the Python
+wheels, so the install itself needs no network beyond fetching BirdNET.
+
+```bash
+# Build (must run ON a Pi -- the vendored wheels are architecture-specific)
+./scripts/build_deb.sh
+
+# Install. Use apt, not "dpkg -i": apt is what resolves the dependencies.
+sudo apt-get install ./dist/ratcatcher_0.1.0_arm64.deb
+
+# The install writes the camera and microphone overlays to config.txt,
+# which the firmware reads only at boot.
+sudo reboot
+```
+
+That is the whole install. It creates the `ratcatcher` service account,
+builds the virtualenv, applies the boot configuration, downloads
+BirdNET, and enables the service. On the reboot, a one-shot unit repairs
+the Hailo driver if a kernel upgrade has orphaned it, then retires
+itself.
+
+```bash
+# Verify
+ratcatcher health
+sudo systemctl status ratcatcher
+sudo journalctl -u ratcatcher -f
+```
+
+Configuration lives in `/etc/ratcatcher/`, and dpkg preserves your edits
+there across upgrades. `sudo apt-get remove ratcatcher` leaves your
+detections alone; `sudo apt-get purge ratcatcher` deletes them.
+
+See `packaging/README.md` for what the package contains and why the
+setup work is split between the postinst and a boot-time unit.
+
+### From a git checkout
+
 ```bash
 # Initial setup (installs system packages, makes the venv, sets up the cameras)
 sudo ./scripts/setup_rpi.sh
@@ -237,8 +277,9 @@ src/ratcatcher/
 
 firmware/                   ESP32-S3 firmware for the CrowPanel display
 models/                     ML model files (.tflite, .onnx, .hef)
+packaging/                  Debian package: control, maintainer scripts, setup helpers
 training/                   CUDA training pipeline (download, train, export)
-scripts/                    RPi5 setup, model download, firmware build
+scripts/                    RPi5 setup, model download, firmware build, deb build
 systemd/                    Systemd service for auto-start
 tests/                      227 tests (pytest, no test doubles)
 docs/                       Architecture and deployment docs

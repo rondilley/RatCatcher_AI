@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from ratcatcher.storage.database import DetectionDatabase
@@ -10,13 +10,20 @@ from ratcatcher.storage.database import DetectionDatabase
 
 @dataclass
 class DetectionStats:
-    """Summary statistics for a time window."""
+    """Summary statistics for a time window.
+
+    ``species_counts`` answers "which birds", ``class_counts`` answers
+    "how many of each kind of animal". They are separate because only
+    the bird path fills in a species: counting animal kinds by species
+    puts every squirrel, rat and cat into one "unknown" bucket.
+    """
 
     window_label: str
     since: str
     total_detections: int
     species_counts: dict[str, int]
     detections_per_hour: float
+    class_counts: dict[str, int] = field(default_factory=dict)
 
     @property
     def top_species(self) -> list[tuple[str, int]]:
@@ -29,20 +36,15 @@ class DetectionStats:
 
     @property
     def bird_count(self) -> int:
-        """Total detections classified as any bird species."""
-        pest_names = {"squirrel", "rat", "cat", "unknown_animal", "unknown"}
-        return sum(
-            count for species, count in self.species_counts.items()
-            if species not in pest_names
-        )
+        """Total detections the detector called a bird."""
+        return self.class_counts.get("bird", 0)
 
     @property
     def pest_count(self) -> int:
-        """Total detections classified as pest animals."""
-        pest_names = {"squirrel", "rat", "cat", "unknown_animal"}
+        """Total detections of a non-bird animal."""
         return sum(
-            count for species, count in self.species_counts.items()
-            if species in pest_names
+            count for class_name, count in self.class_counts.items()
+            if class_name in _PEST_CLASSES
         )
 
 
@@ -89,6 +91,13 @@ _VIDEO_CATEGORY: dict[str, str] = {
     "unknown_animal": "other",
 }
 
+# Every detector class that is not a bird. Derived from the map above
+# rather than listed a second time: the pest count broke once already
+# by keeping its own copy of this set, in the wrong column.
+_PEST_CLASSES: frozenset[str] = frozenset(
+    name for name in _VIDEO_CATEGORY if name != "bird"
+)
+
 # BirdNET labels that name a sound rather than an animal. These are
 # discarded: a passing engine is not a visitor to the feeder.
 _AUDIO_NON_ANIMAL: frozenset[str] = frozenset(
@@ -126,6 +135,62 @@ _AUDIO_RODENT_GENERA: frozenset[str] = frozenset(
     }
 )
 
+# Non-avian genera BirdNET can name that are not rodents either. These
+# are discarded rather than counted: a cricket chirping in the grass is
+# not a visitor to the feeder, the same reasoning that discards a
+# passing engine. The volume is the argument -- 145 cricket windows in
+# one evening, against a handful of real sightings, and filing them
+# under "other" would only move the miscount one column over.
+#
+# Counting them as birds is what the fall-through did before: every
+# binomial that was not a known rodent was assumed avian, so an evening
+# of Allonemobius tinnulus reported 145 birds heard when the
+# microphones heard no bird at all.
+#
+# Derived from models/BirdNET_v2.4_labels_en_us.txt, which contains 84
+# entries in these genera. Genus is the only usable axis: the label
+# file carries no taxonomic rank, and matching common names is a trap
+# -- "Grasshopper Sparrow", "Cicadabird", "Squirrel Cuckoo" and
+# "Cricket Longtail" are all birds. A BirdNET version bump can add
+# taxa, so this list is tied to v2.4.
+_AUDIO_NON_BIRD_GENERA: frozenset[str] = frozenset(
+    {
+        # Orthoptera: crickets, katydids, coneheads, trigs.
+        "Allonemobius",
+        "Amblycorypha",
+        "Anaxipha",
+        "Atlanticus",
+        "Conocephalus",
+        "Cyrtoxipha",
+        "Eunemobius",
+        "Gryllus",
+        "Neoconocephalus",
+        "Neonemobius",
+        "Oecanthus",
+        "Orchelimum",
+        "Orocharis",
+        "Phyllopalpus",
+        "Pterophylla",
+        "Scudderia",
+        # Amphibians: frogs, toads, spadefoots.
+        "Acris",
+        "Anaxyrus",
+        "Dryophytes",
+        "Eleutherodactylus",
+        "Gastrophryne",
+        "Hyliola",
+        "Incilius",
+        "Lithobates",
+        "Pseudacris",
+        "Scaphiopus",
+        "Spea",
+        # Mammals that are not rodents.
+        "Alouatta",
+        "Canis",
+        "Odocoileus",
+    }
+)
+
 
 def categorize(
     modality: str,
@@ -136,16 +201,27 @@ def categorize(
 
     Returns None for records that name no animal at all, which the
     caller must not count. Audio records are judged by species because
-    the unified view reports their class as "bird" regardless.
+    the unified view reports their class as "bird" regardless -- a
+    window with no species is one BirdNET could not identify, a stored
+    sample rather than a bird, and counting it as one made every quiet
+    evening look like a dawn chorus.
+
+    None is also returned for the non-avian taxa BirdNET can name --
+    insects, amphibians and non-rodent mammals -- for the same reason:
+    they are identified sounds, but they are not visitors to the
+    feeder. Rodents are the exception, and are counted, because a rat
+    or a squirrel at the feeder is exactly what this system is for.
     """
     if modality == "audio":
         if species is None:
-            return "bird"
+            return None
         if species in _AUDIO_NON_ANIMAL:
             return None
         genus = species.split()[0] if species else ""
         if genus in _AUDIO_RODENT_GENERA:
             return "rodent"
+        if genus in _AUDIO_NON_BIRD_GENERA:
+            return None
         # A BirdNET label with no space is a sound class, not a binomial.
         if " " not in species:
             return "other"
@@ -219,6 +295,7 @@ def get_stats(
 
     total = db.get_detection_count(since=since)
     counts = db.get_species_counts(since=since)
+    classes = db.get_class_counts(since=since)
 
     if hours is not None and hours > 0:
         per_hour = total / hours
@@ -233,6 +310,7 @@ def get_stats(
         total_detections=total,
         species_counts=counts,
         detections_per_hour=per_hour,
+        class_counts=classes,
     )
 
 
@@ -247,10 +325,23 @@ def format_stats(stats: DetectionStats) -> str:
         f"  Rate: {stats.detections_per_hour:.1f} detections/hour",
     ]
 
-    if stats.species_counts:
+    if stats.class_counts:
+        lines.append("")
+        lines.append("By class:")
+        for class_name, count in sorted(
+            stats.class_counts.items(), key=lambda x: x[1], reverse=True
+        ):
+            lines.append(f"  {class_name}: {count}")
+
+    # The "unknown" bucket is every row with no species, which is all
+    # the pests as well as the birds the classifier passed on. The
+    # class breakdown above already accounts for them, and listing the
+    # bucket here would read as a species.
+    named = [(s, c) for s, c in stats.top_species if s != "unknown"]
+    if named:
         lines.append("")
         lines.append("By species:")
-        for species, count in stats.top_species:
+        for species, count in named:
             lines.append(f"  {species}: {count}")
 
     return "\n".join(lines)

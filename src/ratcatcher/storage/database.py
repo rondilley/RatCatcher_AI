@@ -387,15 +387,23 @@ class DetectionDatabase:
         return results
 
     def get_species_counts(self, since: str | None = None) -> dict[str, int]:
-        """Return a mapping of species name to detection count."""
+        """Return a mapping of species name to detection count.
+
+        Rows with no class name are excluded, the same rule
+        ``get_modality_counts`` applies: they are motion that never
+        reached the detector and identify no animal. The remaining
+        rows with no species are counted as "unknown" -- an animal the
+        detector named but the classifier did not.
+        """
         params: list[object] = []
-        where = ""
+        clauses = ["class_name IS NOT NULL"]
         if since is not None:
-            where = " WHERE timestamp >= ?"
+            clauses.append("timestamp >= ?")
             params.append(since)
 
         query = (
-            f"SELECT species, COUNT(*) as cnt FROM detections{where} "
+            f"SELECT species, COUNT(*) as cnt FROM detections "
+            f"WHERE {' AND '.join(clauses)} "
             f"GROUP BY species ORDER BY cnt DESC"
         )
 
@@ -410,6 +418,43 @@ class DetectionDatabase:
             species_name = row["species"] if row["species"] is not None else "unknown"
             counts[species_name] = row["cnt"]
         return counts
+
+    def get_class_counts(self, since: str | None = None) -> dict[str, int]:
+        """Return a mapping of detector class name to count.
+
+        The class name is what the detector reported: "bird",
+        "squirrel", "rat", "cat" or "unknown_animal". It is the column
+        to count animal kinds by. The species column cannot do it --
+        only the bird path fills it in, so every squirrel, rat and cat
+        carries a NULL species and would tally as one "unknown" bucket.
+
+        Rows with no class name are excluded, the same rule the other
+        counters apply: motion that never reached the detector.
+
+        Parameters
+        ----------
+        since : str or None
+            ISO-8601 timestamp lower bound (inclusive).
+        """
+        params: list[object] = []
+        clauses = ["class_name IS NOT NULL"]
+        if since is not None:
+            clauses.append("timestamp >= ?")
+            params.append(since)
+
+        query = (
+            f"SELECT class_name, COUNT(*) as cnt FROM detections "
+            f"WHERE {' AND '.join(clauses)} "
+            f"GROUP BY class_name ORDER BY cnt DESC"
+        )
+
+        try:
+            rows = self._conn.execute(query, params).fetchall()
+        except sqlite3.Error as exc:
+            logger.error("Failed to query class counts: %s", exc)
+            raise
+
+        return {row["class_name"]: int(row["cnt"]) for row in rows}
 
     def get_modality_counts(self, since: str | None = None) -> list[dict]:
         """Return detection counts grouped by modality, class and species.
@@ -462,14 +507,23 @@ class DetectionDatabase:
         ]
 
     def get_detection_count(self, since: str | None = None) -> int:
-        """Return the total number of detections, optionally since a timestamp."""
+        """Return the number of identified detections, optionally since a timestamp.
+
+        Counts what was identified, not what was stored. Rows with no
+        class name are motion the detector never saw -- a stored frame,
+        not a sighting -- and counting them put the motion rate into
+        every reported total.
+        """
         params: list[object] = []
-        where = ""
+        clauses = ["class_name IS NOT NULL"]
         if since is not None:
-            where = " WHERE timestamp >= ?"
+            clauses.append("timestamp >= ?")
             params.append(since)
 
-        query = f"SELECT COUNT(*) as cnt FROM detections{where}"
+        query = (
+            f"SELECT COUNT(*) as cnt FROM detections "
+            f"WHERE {' AND '.join(clauses)}"
+        )
 
         try:
             row = self._conn.execute(query, params).fetchone()

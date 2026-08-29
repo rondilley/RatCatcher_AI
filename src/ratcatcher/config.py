@@ -183,6 +183,52 @@ class DisplayConfig:
 
 
 @dataclass(frozen=True)
+class SyslogConfig:
+    """Detection and status reporting to syslog.
+
+    An output only, like the status panel. Nothing downstream reads it
+    and nothing in the pipeline waits on it, so a loghost that is down,
+    slow or absent cannot affect detection.
+
+    Only two kinds of record are sent: one line per detection and a
+    periodic status line. Ordinary INFO chatter -- libcamera, picamera2,
+    model loading -- stays in journald. A forwarded stream is worth
+    keeping narrow: it is the one view of the system an operator has
+    when the Pi itself is out of reach.
+    """
+
+    # On by default, unlike the panel and the microphones. Those need
+    # hardware that may not be attached; this needs a local socket that
+    # every Raspberry Pi OS install already has. An upgrade that keeps
+    # its old conffile, and so has no syslog block at all, still starts
+    # reporting rather than staying silent until someone notices.
+    enabled: bool = True
+    # A path is a local syslog socket; "host:port" is a remote loghost.
+    address: str = "/dev/log"
+    # Transport for a remote loghost. Ignored for a socket path.
+    protocol: str = "udp"
+    # local0 rather than daemon: this is application output, and keeping
+    # it off daemon lets rsyslog route feeder detections to their own
+    # file without catching every other service on the Pi.
+    facility: str = "local0"
+    # Tag the lines carry, which is what "journalctl -t" matches on.
+    ident: str = "ratcatcher"
+
+    # One line per stored detection.
+    detections: bool = True
+
+    # -- periodic status --
+    # Far longer than the panel's refresh. The panel redraws to stay
+    # readable at a glance; this exists to prove the system is alive and
+    # to carry counts, and one line every five minutes does that without
+    # filling a loghost with a mostly unchanging record.
+    status_interval_seconds: float = 300.0
+    # Counting window: "today" (since local midnight), "24h", or "all".
+    # Matches display.window so the two agree by default.
+    status_window: str = "today"
+
+
+@dataclass(frozen=True)
 class MonitoringConfig:
     health_interval_seconds: int = 60
     temp_warning_c: float = 75.0
@@ -209,6 +255,7 @@ class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     display: DisplayConfig = field(default_factory=DisplayConfig)
     alerts: AlertConfig = field(default_factory=AlertConfig)
+    syslog: SyslogConfig = field(default_factory=SyslogConfig)
     monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
 
     @property
@@ -305,5 +352,6 @@ def load_config(config_path: str | Path | None = None) -> Config:
         audio=_build_section(AudioConfig, raw.get("audio")),
         display=_build_section(DisplayConfig, raw.get("display")),
         alerts=_build_section(AlertConfig, raw.get("alerts")),
+        syslog=_build_section(SyslogConfig, raw.get("syslog")),
         monitoring=_build_section(MonitoringConfig, raw.get("monitoring")),
     )
