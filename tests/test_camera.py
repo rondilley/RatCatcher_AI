@@ -260,3 +260,223 @@ class TestFrameBufferThreadSafety:
         # get_frames should not raise under concurrent access either
         results = buf.get_frames(seconds=60.0)
         assert len(results) == 500
+
+
+# -- PicameraSource shutdown ---------------------------------------------------
+#
+# Skipped unless picamera2 imports and a camera is actually attached.  These
+# cover the shutdown path that hung the service: stop() discarded the result
+# of its capture-thread join and closed the camera regardless, which
+# deadlocks picamera2's close() against an outstanding capture_array().
+
+from ratcatcher.camera.capture import _PICAMERA2_AVAILABLE  # noqa: E402
+
+if _PICAMERA2_AVAILABLE:
+    from ratcatcher.camera.capture import PicameraSource
+
+
+def _camera_is_attached() -> bool:
+    """Is there a camera this process can actually open?"""
+    if not _PICAMERA2_AVAILABLE:
+        return False
+    try:
+        from picamera2 import Picamera2
+
+        return len(Picamera2.global_camera_info()) > 0
+    except Exception:
+        return False
+
+
+requires_camera = pytest.mark.skipif(
+    not _camera_is_attached(), reason="no attached camera"
+)
+
+
+@requires_camera
+def test_stop_returns_promptly_and_releases_the_camera():
+    """stop() must complete, not wedge the caller."""
+    source = PicameraSource(camera_num=0, resolution=(640, 480), fps=30)
+    source.start()
+    assert source.is_running
+
+    # Let the capture thread produce at least one frame, so stop() runs
+    # against a live pipeline rather than an idle one.
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        ok, _ = source.read()
+        if ok:
+            break
+        time.sleep(0.05)
+
+    started = time.monotonic()
+    source.stop()
+    elapsed = time.monotonic() - started
+
+    # The join alone is bounded at 3s; a successful close adds well under
+    # a second.  Anything past 10s means the deadlock is back.
+    assert elapsed < 10.0, f"stop() took {elapsed:.1f}s"
+    assert not source.is_running
+
+
+@requires_camera
+def test_camera_can_be_reopened_after_stop():
+    """A stop that really released the device lets the next start succeed.
+
+    This is what distinguishes a clean close from the deadlock guard, which
+    deliberately leaks the device: if stop() had bailed out early, opening
+    the same camera again would fail with the device busy.
+    """
+    for _ in range(3):
+        source = PicameraSource(camera_num=0, resolution=(640, 480), fps=30)
+        source.start()
+        assert source.is_running
+        source.stop()
+        assert not source.is_running
+
+
+# -- Channel order -------------------------------------------------------------
+#
+# PicameraSource must hand out BGR, because every consumer treats it as BGR:
+# HailoDetector and the species classifier both cvtColor BGR2RGB before
+# inference, the OpenCV backend sets swapRB=True, thumbnails go through
+# cv2.imwrite, and the clip writer converts BGR to RGB for FFmpeg.
+#
+# It asked picamera2 for "BGR888" and got RGB, because libcamera names a
+# format by memory byte order and numpy reads that back reversed. Red and
+# blue were swapped through the entire video path.
+#
+# Ground truth has to come from outside the library, so these compare against
+# rpicam-still, which writes a correctly-coloured JPEG.
+
+import shutil  # noqa: E402
+import subprocess  # noqa: E402
+
+
+def _rpicam_reference(tmp_path, camera=0):
+    """A correctly-coloured BGR image of whatever the camera sees."""
+    out = tmp_path / "truth.jpg"
+    try:
+        subprocess.run(
+            ["rpicam-still", "--camera", str(camera), "--width", "1332",
+             "--height", "990", "--timeout", "2000", "--nopreview",
+             "-o", str(out)],
+            check=True, capture_output=True, timeout=60,
+        )
+    except (subprocess.SubprocessError, OSError):
+        pytest.skip("rpicam-still did not produce a reference frame")
+    img = cv2.imread(str(out))
+    if img is None:
+        pytest.skip("reference frame unreadable")
+    return img
+
+
+requires_reference = pytest.mark.skipif(
+    not (_camera_is_attached() and shutil.which("rpicam-still")),
+    reason="needs an attached camera and rpicam-still",
+)
+
+
+def _channel_grid(image, cells=24):
+    """A coarse spatial signature per channel.
+
+    Global channel means cannot decide channel order here: rpicam-still
+    and the video pipeline apply different white balance, so the two
+    captures of one scene differ by a per-channel gain. Comparing the
+    spatial *pattern* instead is immune to that -- a gain cancels in the
+    normalisation, while sky-versus-wall structure does not.
+    """
+    small = cv2.resize(image, (cells * 4, cells * 3), interpolation=cv2.INTER_AREA)
+    return small.astype(np.float32).reshape(-1, 3)
+
+
+def _normalised(values):
+    return (values - values.mean()) / (values.std() + 1e-6)
+
+
+def _capture_one(camera=0, size=(1332, 990)):
+    source = PicameraSource(camera_num=camera, resolution=size, fps=30)
+    source.start()
+    try:
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            ok, frame = source.read()
+            if ok:
+                return frame
+            time.sleep(0.1)
+    finally:
+        source.stop()
+    return None
+
+
+@requires_reference
+def test_picamera_source_delivers_bgr_not_rgb(tmp_path):
+    """The regression that swapped red and blue through the whole pipeline."""
+    truth = _rpicam_reference(tmp_path)
+    frame = _capture_one()
+    assert frame is not None, "camera produced no frame"
+
+    t = _channel_grid(truth)
+    a = _channel_grid(frame)
+
+    identity = float(
+        np.mean([np.mean(_normalised(a[:, k]) * _normalised(t[:, k])) for k in range(3)])
+    )
+    reversed_ = float(
+        np.mean(
+            [np.mean(_normalised(a[:, k]) * _normalised(t[:, 2 - k])) for k in range(3)]
+        )
+    )
+
+    # Identity against reversal is the whole question, and it is the only
+    # one this scene can answer. Asserting that each channel's *best*
+    # match is itself would be testing scene statistics rather than
+    # channel order: in daylight R and G track luminance together and are
+    # nearly collinear, so red's closest match is green whichever way
+    # round the channels are.
+    assert identity > reversed_ + 0.05, (
+        f"channel order is reversed: identity pairing r={identity:.3f} vs "
+        f"reversed r={reversed_:.3f}. PicameraSource is handing out RGB while "
+        f"every consumer treats it as BGR."
+    )
+    # Blue is the channel that carries independent information outdoors,
+    # so it is the one that pins the ordering.
+    blue_to_blue = float(np.mean(_normalised(a[:, 0]) * _normalised(t[:, 0])))
+    blue_to_red = float(np.mean(_normalised(a[:, 0]) * _normalised(t[:, 2])))
+    assert blue_to_blue > blue_to_red, (
+        f"source channel 0 matches truth red ({blue_to_red:.3f}) better than "
+        f"truth blue ({blue_to_blue:.3f})"
+    )
+
+
+@requires_reference
+def test_blue_sky_lands_in_the_blue_channel(tmp_path):
+    """A direct, human-checkable statement of the same thing.
+
+    Skipped rather than failed indoors or after dark, where the top of the
+    frame is not sky and the premise does not hold.
+    """
+    truth = _rpicam_reference(tmp_path)
+    top = truth[: truth.shape[0] // 5].reshape(-1, 3).mean(axis=0)
+    if not (top[0] > top[2] + 15):
+        pytest.skip("top of frame is not blue sky; nothing to compare against")
+
+    source = PicameraSource(camera_num=0, resolution=(1332, 990), fps=30)
+    source.start()
+    try:
+        frame = None
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            ok, f = source.read()
+            if ok:
+                frame = f
+                break
+            time.sleep(0.1)
+        assert frame is not None, "camera produced no frame"
+    finally:
+        source.stop()
+
+    band = frame[: frame.shape[0] // 5].reshape(-1, 3).mean(axis=0)
+    assert band[0] > band[2], (
+        f"sky is brightest in channel {int(np.argmax(band))}; in BGR it must "
+        f"be channel 0 (blue). Channel means: {np.round(band, 1)}"
+    )

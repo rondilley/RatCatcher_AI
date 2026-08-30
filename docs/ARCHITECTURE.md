@@ -59,13 +59,51 @@ Key parameters:
 - Resolution: 320x240 (not related to the camera resolution)
 - Morphological cleanup: erode (3x3), then dilate (7x7)
 - Minimum contour area: 0.5% of the frame area
+- **Maximum** contour area: 50% of the frame area. A cloud crossing the
+  sun, or an auto-exposure step, changes every pixel at once and MOG2
+  reports it as one region covering ~99% of the image. Measured on this
+  installation that was the *only* motion the cameras produced across 680
+  frames. It is rejected before the cooldown grid is touched, so a
+  passing cloud cannot also suppress the real motion behind it.
 - Grid cooldown (8x6 cells, 2 s default) prevents a duplicate detection
 - Optional ROI polygon mask limits the detection zones
 
 ### Stage 1: Object Detection (YOLO)
 
-This stage runs only on the frames that have motion. YOLOv8n puts the
-objects it finds into five categories:
+This stage runs only on the frames that have motion. It is fed a
+native-resolution window cut around the motion, not the whole frame.
+
+Both detection backends reach the model's 640x640 input by stretching
+whatever frame they are handed, so a 1920x1080 frame has its object
+heights divided by 1.7 and its widths by 3. Recall against object size
+collapses below about 100 px and is zero at 50 px, and at a typical
+feeder framing a House Finch is 25-33 px. Every target species sat under
+the floor: the system was not missing animals, it could not have seen
+one.
+
+`detection/roi_crop.py` turns motion regions into 640x640 windows cut
+from the full 4056x3040 capture, so nothing is rescaled on the way in.
+Measured on 100 labelled crops composited into a live frame:
+
+| Species | Full frame | ROI @1080p | ROI @ sensor res |
+|---|---:|---:|---:|
+| House Finch | 0/100 | 1/100 | 38/100 |
+| Squirrel | 1/100 | 25/100 | 55/100 |
+| Cat | 2/100 | 50/100 | 78/100 |
+
+The middle column is why `capture_resolution` exists: cropping alone
+recovers the pests but not the birds.
+
+**The full frame never leaves the camera loop.** A 4056x3040 BGR frame is
+37 MB, the pre-event ring buffer holds `fps * clip_pre_seconds` = 70 of
+them, and the detection queue holds 64 more. So the capture frame is used
+for exactly two things -- motion detection and cutting windows -- and what
+is enqueued is the 1920x1080 downscale plus the windows at 1.2 MB each.
+`DetectionEvent.capture_scale` maps a box found in a window back onto
+that frame, which is what the classifier crop, the thumbnail and the
+stored row all use.
+
+YOLOv8n puts the objects it finds into five categories:
 
 | Class | ID | Description |
 |---|---|---|
@@ -268,6 +306,88 @@ own schedule. Thus the two can enter the update path. A lock protects
 it: with no lock, the two calls contend on the serial read, and each
 one takes the bytes that the other was about to read.
 
+## Field Tools (Setting the Lenses)
+
+The UC-517 lenses have no software focus control, so focus is a ring
+turned by hand at the enclosure. Two tools close that loop. Both are
+standalone: they share no queue, thread or lock with `PipelineEngine`,
+and both hold the cameras, so the service must be stopped first -- which
+the CLI checks for and says, rather than letting libcamera fail with a
+device-busy backtrace.
+
+```mermaid
+flowchart LR
+    CAM["2x PicameraSource<br/>4056x3040"] --> FE["FocusEngine<br/>read, measure, deduplicate"]
+    CAM --> WEB["FocusWebServer<br/>1:1 crop + telemetry"]
+    FE --> PANEL["CrowPanel e-paper<br/>press to read"]
+    WEB --> PHONE["Browser on a phone"]
+```
+
+### Why there are two
+
+`camera/focus.py` computes a blur ratio: it re-blurs the frame and
+measures how much detail that destroys. An already-soft frame loses
+almost nothing, so the ratio approaches its floor, which is what anchors
+0% -- a percentage needs a fixed zero and sharpness has no natural scale.
+
+That metric hill-climbs well on a nearly-focused lens and is least
+trustworthy on a badly defocused one, because a soft frame holds so
+little real detail that the measurement is largely sensor noise. Measured
+here, camera 0 (sharp) varied 2.6 points across consecutive reads while
+camera 1 (soft) varied 18.1. A metric whose accuracy collapses in the
+regime it exists to serve cannot be the only instrument.
+
+So `web/focus_server.py` serves the pixels and lets the eye decide. The
+score remains on the page as telemetry, beside the exposure and light
+readings that say whether a frame is worth judging at all.
+
+### FocusWebServer (web/focus_server.py)
+
+Standard library `http.server` plus the OpenCV already present.
+
+- **The crop is 1:1.** Focus lives in the highest spatial frequencies and
+  any downscale is a low-pass filter over exactly the detail being
+  judged, so a fitted frame looks acceptable at every lens position. The
+  default view is a 720x720 window of native sensor pixels.
+- **The window moves on a 3x3 grid**, because focus is not uniform: the
+  centre and edges of this installation differ by tens of points, so a
+  lens set on the middle of the frame can leave the feeders soft.
+- **One response per connection, 15 s socket timeout.** With HTTP/1.1
+  keep-alive and no timeout, a phone that sleeps or roams left its socket
+  ESTABLISHED with a thread parked in `wfile.write()` forever; those
+  corpses occupied the browser's six-connections-per-host budget, so the
+  next page load waited on a socket the server still believed was live.
+  It presents as a dead server while the server is idle and instantly
+  responsive on loopback.
+- **Four second refresh.** A lens is turned and then looked at, so this
+  is a viewer, not a video feed. Every refresh is a full-resolution crop
+  plus a JPEG encode per camera.
+
+Binds to every interface with no authentication: a bring-up tool for a
+private network, not a service.
+
+### FocusEngine (pipeline/focus_engine.py)
+
+Drives the e-paper panel for when no phone is to hand. Press-to-sample
+rather than free-running, because a reading taken while a hand is still
+in front of the lens is noise, and because e-paper is built for
+infrequent updates.
+
+Two settling rules matter, and the second was not obvious:
+
+- **Wait for a frame, not for a duration.** A fixed one-second sleep was
+  enough at 1920x1080 and silently stopped being enough at 4056x3040.
+- **Wait for the reading to stop moving, not just for exposure.** Every
+  camera control freezes within 0.7 s while the measurement goes on
+  falling from 56% to 32% for another three seconds, as the ISP's
+  temporal denoise converges and the early frames' sensor noise is
+  counted as detail. No metadata reports this, so `readings_settled`
+  watches the measurement itself.
+
+A button press forces a full-waveform refresh: partial updates on this
+panel resolve over two writes, so presses otherwise alternated between a
+half-formed screen and a correct one.
+
 ## Data Storage
 
 ### SQLite Database
@@ -376,6 +496,14 @@ Four factory patterns give the cross-platform support.
 
 ### Camera Factory (camera/platform_camera.py)
 
+Opens a picamera source at `capture_resolution` when the config sets one,
+falling back to `resolution` otherwise, so an existing config is
+unaffected. `PicameraSource` requests picamera2's `"RGB888"`, which is
+its name for what numpy reads back as **BGR** -- libcamera names a format
+by byte order in memory. Every consumer treats a frame as BGR, so asking
+for `"BGR888"` silently swapped red and blue through the whole video
+path.
+
 ```mermaid
 flowchart LR
     A["source_type=auto"] --> P["Picamera2"]
@@ -480,14 +608,20 @@ COCO remap.
 | YOLO model (Hailo/NCNN) | ~200 MB |
 | Species classifier (TFLite INT8) | ~50 MB |
 | BirdNET (TFLite FP32, 52 MB weights) | ~156 MB (measured) |
-| Frame buffers (2 cameras) | ~200 MB |
+| Frame buffers, 2 cameras at 4056x3040 | ~450 MB |
 | Audio window buffers (2 channels) | ~10 MB |
 | SQLite + Python | ~150 MB |
-| **Total** | **~1.4 GB** |
+| **Total** | **~1.46 GB (measured RSS)** |
 
-Approximately 2.6 GB stays free on a 4 GB headless system. BirdNET is
-the largest model file in the system, because it is FP32 and the two
-vision models are quantized.
+Approximately 1.1 GB stays free on a 4 GB headless system, measured flat
+across a run rather than estimated. BirdNET is the largest model file,
+because it is FP32 and the two vision models are quantized.
+
+Full-resolution capture is what makes this tighter than it looks. A
+4056x3040 BGR frame is 37 MB, so the budget only works because such a
+frame never enters a queue or a ring buffer -- see Stage 1. Sizing the
+pre-event buffer in full-resolution frames instead would need 2.6 GB per
+camera, which does not fit.
 
 ## Deployment
 

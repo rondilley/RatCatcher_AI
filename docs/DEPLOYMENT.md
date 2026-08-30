@@ -43,6 +43,73 @@ flowchart TB
 - Install a rain hood to keep water off the lens window
 - Angle them down (15-30 degrees) for the best feeder coverage
 
+### Setting the Lenses
+
+The Arducam UC-517 lenses have no software focus control: libcamera
+exposes neither `LensPosition` nor any `Af` control for them. Focus is a
+ring turned by hand, outdoors. Stop the service first, or libcamera fails
+with a device-busy backtrace:
+
+```
+sudo systemctl stop ratcatcher
+```
+
+**Judge focus by eye, on the web viewer.** This is the reliable method.
+
+```
+ratcatcher focus --web-only
+```
+
+It prints a URL. Open it on a phone on the same network.
+
+| Control | What it does |
+|---|---|
+| 1:1 crop | 720x720 window of native sensor pixels. **Judge focus on this.** |
+| whole frame | Downscaled. For aiming only -- never for focus. |
+| 3x3 grid | Moves the crop around the frame. |
+| refresh now | Immediate update, for right after turning the ring. |
+| 2s / 4s / 8s | Refresh cadence. |
+| pause | Freeze, to study a frame. |
+
+Two things matter and are easy to get wrong:
+
+- **Never judge focus on the fitted view.** Any downscale is a low-pass
+  filter over exactly the detail being judged, and a fitted frame looks
+  acceptable at every lens position.
+- **Use the grid.** Focus is not uniform across the frame. Set the lens
+  for the region the feeders occupy, not the centre by default.
+
+The percentage beside each camera is telemetry, not the instrument. It
+hill-climbs adequately on a nearly-focused lens and is least trustworthy
+on a badly defocused one, where a frame holds so little real detail that
+the measurement is largely sensor noise.
+
+**The e-paper panel alternative** is for when no phone is to hand:
+
+```
+ratcatcher focus
+```
+
+OK / NEXT / PREV take a reading, HOME reads and clears ghosting, EXIT
+quits. Watch PEAK rather than the live number: turning past the optimum
+makes the live value fall away from a peak that stays put, and that
+comparison holds whatever the uncalibrated ceiling is set to. Wait a
+couple of seconds after turning before pressing -- a reading taken
+before the sensor's denoise settles is inflated.
+
+Both modes hold the cameras, so the detection pipeline cannot run at the
+same time. `--web` runs the viewer and the panel together.
+
+The viewer binds to every interface with no authentication. If the phone
+is on a different subnet from the Pi, a router will usually block it;
+tunnel over SSH instead, which needs no firewall change:
+
+```
+ssh -N -L 8080:127.0.0.1:8080 <user>@<pi-address>
+```
+
+then open `http://localhost:8080`.
+
 ### Microphone Wiring
 
 The two microphones share one I2S bus. SEL is the only difference in
@@ -468,6 +535,10 @@ GROUP BY species ORDER BY seen + heard DESC;
 - [ ] Schedule a reboot each night with cron
 - [ ] Set up remote SSH access
 - [ ] Put the enclosure at a 15-30 degree angle, pointed down
+- [ ] Both lenses set by eye on the 1:1 crop (refer to Setting the Lenses)
+- [ ] The feeders fill enough of the frame: an animal under ~100 px tall
+      in the capture frame is below the detector's floor, and species ID
+      needs ~150 px
 
 ## Troubleshooting
 

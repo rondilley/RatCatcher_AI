@@ -113,6 +113,7 @@ class MotionDetector:
         # --- 5. Filter by area, apply cooldown, scale back ---
         proc_area = proc_w * proc_h
         min_area_abs = self._config.min_area_pct * proc_area
+        max_area_abs = self._config.max_area_pct * proc_area
 
         scale_x = orig_w / proc_w
         scale_y = orig_h / proc_h
@@ -124,6 +125,14 @@ class MotionDetector:
         for cnt in contours:
             cnt_area = cv2.contourArea(cnt)
             if cnt_area < min_area_abs:
+                continue
+
+            # A region this large is the whole scene changing at once --
+            # a cloud crossing the sun, or an auto-exposure step -- not an
+            # animal.  Rejected before the cooldown grid is touched, so a
+            # passing cloud does not also suppress the real motion that
+            # follows it in the same cell.
+            if cnt_area > max_area_abs:
                 continue
 
             bx, by, bw, bh = cv2.boundingRect(cnt)

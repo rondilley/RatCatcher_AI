@@ -99,7 +99,7 @@ git clone <repo-url> && cd RatCatcher_AI
 python3 -m venv venv
 venv/bin/pip install -e ".[dev,display,audio]"
 
-# Run the tests (227 tests, no test doubles -- true WAVs, true SQLite)
+# Run the tests (372 tests, no test doubles -- true WAVs, true SQLite)
 venv/bin/pytest tests/ -v
 
 # Show the system data
@@ -214,6 +214,14 @@ ratcatcher display --list-ports    # List the serial ports to examine
 ratcatcher display --once          # Send one frame and stop
 ratcatcher display                 # Drive the panel until Ctrl-C
 ratcatcher display --port /dev/ttyUSB0   # Give the port, do not examine each one
+
+ratcatcher focus --web-only        # Live camera views in a browser (use this)
+ratcatcher focus --web             # Web viewer AND the e-paper panel together
+ratcatcher focus                   # E-paper panel only, press a button to read
+ratcatcher focus --preview         # One reading as text, no panel, no server
+ratcatcher focus --camera 1        # Measure one camera
+ratcatcher focus --web-port 9000   # Serve on a different port
+ratcatcher focus --web-refresh 8   # Seconds between refreshes (default 4)
 ```
 
 Use `display --preview` first when the screen is incorrect. It builds
@@ -224,6 +232,93 @@ the link or in the firmware.
 Note that `test-mic --identify` does not use the activity gate. It
 reports the raw BirdNET output. Thus it gives species names for room
 noise. The live pipeline uses the gate first.
+
+## Setting the Lenses
+
+The Arducam UC-517 lenses have no software focus control -- libcamera
+exposes no `LensPosition` and no autofocus for them. Focus is a ring
+turned by hand at the enclosure. Stop the service first, or libcamera
+fails with a device-busy error:
+
+```bash
+sudo systemctl stop ratcatcher
+ratcatcher focus --web-only
+```
+
+That prints a URL. Open it on a phone on the same network and turn the
+ring until the picture looks sharp.
+
+| Control | What it does |
+|---|---|
+| **1:1 crop** | 720x720 window of native sensor pixels. **Judge focus here.** |
+| whole frame | Downscaled. For aiming only -- never for focus. |
+| 3x3 grid | Moves the crop around the frame. |
+| refresh now | Immediate update, for right after turning the ring. |
+| 2s / 4s / 8s | Refresh cadence (4s default). |
+| pause | Freeze a frame to study it. |
+
+Two mistakes are easy to make and both look fine at the time:
+
+- **Never judge focus on the fitted view.** Any downscale is a low-pass
+  filter over exactly the detail you are trying to see, so a fitted frame
+  looks acceptable at every lens position.
+- **Use the grid.** Focus is not uniform across the frame. Set the lens
+  for the region the feeders occupy, not the centre by default.
+
+The percentage next to each camera is telemetry, not the instrument. It
+hill-climbs adequately on a nearly-focused lens, and is least trustworthy
+on a badly defocused one -- a soft frame holds so little real detail that
+the measurement is largely sensor noise. Trust the picture.
+
+### Without a phone
+
+The e-paper panel does the same job with no network:
+
+```bash
+ratcatcher focus
+```
+
+`OK` / `NEXT` / `PREV` take a reading, `HOME` reads and clears ghosting,
+`EXIT` quits. Watch `PEAK` rather than the live number: turning past the
+optimum makes the live value fall away from a peak that stays put, and
+that comparison holds whatever the (uncalibrated) ceiling is set to.
+Wait a second or two after turning before pressing -- a reading taken
+before the sensor's noise reduction settles reads high.
+
+### If the browser cannot reach it
+
+The viewer binds to every interface with no authentication. If your phone
+or laptop is on a different subnet from the Pi, a router will usually
+block the port. Tunnel over SSH instead, which needs no firewall change:
+
+```bash
+ssh -N -L 8080:127.0.0.1:8080 <user>@<pi-address>
+```
+
+then open `http://localhost:8080`.
+
+### How close is close enough
+
+Detection recall collapses when an animal is small in frame, and species
+identification needs more pixels still:
+
+| On-screen height | Detection | Species ID |
+|---|---|---|
+| 150 px+ | good | ~85% |
+| 100 px | marginal | ~60% |
+| 66 px | poor | ~9% |
+| 50 px or less | none | none |
+
+So aim for a bird occupying roughly 150 px in the capture frame. If it
+does not, no amount of focusing will help -- move the cameras closer or
+fit a longer lens.
+
+Both modes hold the cameras, so the detection pipeline cannot run at the
+same time. Restart it when you are done:
+
+```bash
+sudo systemctl start ratcatcher
+```
 
 ## ML Models
 
@@ -263,7 +358,7 @@ config/
   species.yaml              50 Western US bird species + 9 pest species
 
 src/ratcatcher/
-  cli.py                    CLI entry point (run/stats/health/test-mic/test-camera)
+  cli.py                    CLI entry point (run/stats/health/focus/test-mic/test-camera)
   config.py                 YAML config loading with frozen dataclasses
   camera/                   Camera abstraction (Picamera2, file, webcam)
   motion/                   MOG2 motion detection + ROI masking
@@ -271,6 +366,7 @@ src/ratcatcher/
   classification/           MobileNet V2 species classification (TFLite)
   audio/                    I2S capture, conditioning, activity gate, BirdNET
   display/                  E-paper status panel over USB serial
+  web/                      Live camera views over HTTP, for setting a lens
   pipeline/                 Threaded engines (video and audio)
   storage/                  SQLite logging, FFmpeg clips, thumbnails
   monitoring/               System health + detection statistics
@@ -281,7 +377,7 @@ packaging/                  Debian package: control, maintainer scripts, setup h
 training/                   CUDA training pipeline (download, train, export)
 scripts/                    RPi5 setup, model download, firmware build, deb build
 systemd/                    Systemd service for auto-start
-tests/                      227 tests (pytest, no test doubles)
+tests/                      372 tests (pytest, no test doubles)
 docs/                       Architecture and deployment docs
 ```
 

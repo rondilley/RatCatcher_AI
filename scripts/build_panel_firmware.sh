@@ -33,14 +33,14 @@ set -euo pipefail
 # which .gitignore already covers. An installed package cannot: this
 # script sits in /opt/ratcatcher/lib/ and the sketch in
 # /opt/ratcatcher/firmware/, both root-owned and both dpkg's, while a
-# build writes about 2.3 GB of ESP32 toolchain plus the downloaded
+# build writes about 7.3 GB of ESP32 toolchain plus the downloaded
 # Elecrow driver files. That would need root and would leave files
 # behind that dpkg knows nothing about. So an installed run builds in
 # the invoking user's cache directory, with the sketch copied there.
 #
 # pyproject.toml is the marker for a checkout. Testing whether
 # firmware/ is writable would not do: under sudo /opt/ratcatcher is
-# writable too, and the 2.3 GB would land in the package directory.
+# writable too, and the 7.3 GB would land in the package directory.
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX="$(dirname "${SELF_DIR}")"
@@ -209,9 +209,28 @@ ensure_python3
 # --------------------------------------------------------------------
 # Core and libraries
 # --------------------------------------------------------------------
+#
+# Budget 7.3 GB and check you have it. Measured on 2026-08-29 with
+# arduino-esp32 3.3.11; the figure here used to say 2.3 GB, which was
+# true of an older core and cost a filled root filesystem when it was
+# believed against 6.3 GB free.
+#
+# The bulk is not the compiler. The core installs a separate lib
+# package for every chip it supports -- esp32, c3, c5, c6, h2, p4,
+# p4_es, s2, s3 -- at roughly 250 MB each, and this board needs
+# exactly one of them, esp32s3-libs. arduino-cli offers no way to ask
+# for a single target, so all of them arrive or none do.
+#
+# A tree that is already complete can be borrowed rather than fetched
+# again, which matters on a Pi that has no room for a second copy:
+#
+#   ln -sfn ~/.cache/ratcatcher-panel/.arduino firmware/.arduino
+#
+# Remove the link afterwards: .gitignore lists firmware/.arduino/ with
+# a trailing slash, which matches a directory and not a symlink.
 
 if [[ ! -d "${ARDUINO_DIRECTORIES_DATA}/packages/esp32" ]]; then
-    log "Installing the ESP32 core (about 2.3 GB, and slow, the first time)"
+    log "Installing the ESP32 core (about 7.3 GB, and slow, the first time)"
     "${ARDUINO_CLI}" config init --overwrite >/dev/null
     "${ARDUINO_CLI}" config add board_manager.additional_urls \
         https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json

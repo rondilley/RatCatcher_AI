@@ -17,7 +17,7 @@ together.
 
 from __future__ import annotations
 
-from ratcatcher.display.protocol import StatusFrame
+from ratcatcher.display.protocol import ScreenFrame, ScreenLine, StatusFrame
 
 # Character width of the preview.
 WIDTH = 41
@@ -62,11 +62,29 @@ def render_text(frame: StatusFrame) -> str:
     return "\n".join(line[:WIDTH].ljust(WIDTH) for line in lines)
 
 
+def render_screen_text(frame: ScreenFrame) -> str:
+    """Render one generic screen as the panel will show it.
+
+    The bar is drawn as characters here and as filled pixels on the
+    panel, so the width is representative rather than exact -- the same
+    caveat the module docstring makes about the count columns.
+    """
+    lines = [frame.title, "-" * WIDTH]
+    for line in frame.lines:
+        lines.append(_screen_row(line))
+        if line.rule:
+            lines.append("-" * WIDTH)
+    return "\n".join(line[:WIDTH].ljust(WIDTH) for line in lines)
+
+
 def render_box(frame: StatusFrame) -> str:
     """Render the frame inside a border, for the command line."""
-    body = render_text(frame).split("\n")
-    rule = "+" + "-" * (WIDTH + 2) + "+"
-    return "\n".join([rule] + [f"| {line} |" for line in body] + [rule])
+    return _box(render_text(frame))
+
+
+def render_screen_box(frame: ScreenFrame) -> str:
+    """Render a generic screen inside a border, for the command line."""
+    return _box(render_screen_text(frame))
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +144,24 @@ def _system_line(frame: StatusFrame) -> str:
         parts.append(f"disk {system.disk_pct:.0f}%")
     parts.append(f"up {system.uptime}")
     return "  ".join(parts)
+
+
+def _box(body_text: str) -> str:
+    body = body_text.split("\n")
+    rule = "+" + "-" * (WIDTH + 2) + "+"
+    return "\n".join([rule] + [f"| {line} |" for line in body] + [rule])
+
+
+def _screen_row(line: ScreenLine) -> str:
+    if line.bar is None:
+        return line.text
+    # The bar takes what the text leaves, so a long label shortens the
+    # bar rather than pushing it off the screen.
+    room = WIDTH - len(line.text) - 3
+    if room < 4:
+        return line.text
+    filled = int(round(max(0, min(100, line.bar)) / 100.0 * room))
+    return f"{line.text} [{'#' * filled}{'.' * (room - filled)}]"
 
 
 def _place(line: list[str], text: str, right_edge: int) -> None:

@@ -82,7 +82,10 @@ class TestCameraConfigFromYaml:
         assert cam0.enabled is True
         assert cam0.source_type == "auto"
         assert cam0.resolution == (1920, 1080)
-        assert cam0.fps == 30
+        # Full sensor readout, so the detector gets native pixels; 14 fps
+        # is the sensor maximum at that size.
+        assert cam0.capture_resolution == (4056, 3040)
+        assert cam0.fps == 14
         assert cam0.file_path is None
         assert cam0.device_index == 0
         assert cam0.roi == []
@@ -90,6 +93,23 @@ class TestCameraConfigFromYaml:
         cam1 = cfg.cameras[1]
         assert cam1.id == 1
         assert cam1.device_index == 1
+        assert cam1.capture_resolution == (4056, 3040)
+
+
+class TestCaptureResolutionIsOptional:
+    def test_absent_capture_resolution_stays_none(self, tmp_path) -> None:
+        """An upgrade whose conffile predates this key must not change."""
+        path = tmp_path / "old.yaml"
+        path.write_text(
+            "cameras:\n"
+            "  - id: 0\n"
+            "    resolution: [1920, 1080]\n"
+            "    fps: 30\n"
+        )
+        cam = load_config(path).cameras[0]
+        assert cam.capture_resolution is None
+        assert cam.resolution == (1920, 1080)
+        assert cam.fps == 30
 
 
 # -------------------------------------------------------------------

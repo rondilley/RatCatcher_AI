@@ -16,7 +16,16 @@ cameras:
     # "picamera", "webcam", or "file"
     source_type: "auto"
     resolution: [1920, 1080]
-    fps: 30
+    # Sensor readout size. The detector needs native-resolution pixels to
+    # see a small animal: squeezing a whole 1920x1080 frame into the
+    # model's 640x640 input leaves a House Finch about 17 px tall, well
+    # under the ~100 px where recall collapses. Reading out the full
+    # 4056x3040 sensor and cutting a 640x640 window instead leaves the
+    # same bird at about 62 px. Costs frame rate -- 14 fps is the sensor
+    # maximum at full resolution -- and the frame never travels further
+    # than the camera loop, which downscales to `resolution` above.
+    capture_resolution: [4056, 3040]
+    fps: 14
     # For file source: path to video file or image directory
     file_path: null
     # For webcam source: device index
@@ -29,7 +38,8 @@ cameras:
     enabled: true
     source_type: "auto"
     resolution: [1920, 1080]
-    fps: 30
+    capture_resolution: [4056, 3040]
+    fps: 14
     file_path: null
     device_index: 1
     roi: []
@@ -48,6 +58,12 @@ motion:
   dilate_kernel: 7
   # Minimum contour area as percentage of frame area (0.0 - 1.0)
   min_area_pct: 0.005
+  # Maximum contour area as a fraction of frame area. A cloud crossing the
+  # sun, or an auto-exposure step, changes every pixel at once and MOG2
+  # reports it as a single region covering ~99% of the frame. Measured on
+  # this Pi that was the ONLY motion the cameras produced in 680 frames,
+  # and it would drive the ROI-crop window back to the whole frame.
+  max_area_pct: 0.5
   # Seconds to suppress repeated detections in the same region
   cooldown_seconds: 2.0
   # MOG2 learning rate (-1 for auto)
@@ -74,6 +90,21 @@ detection:
   confidence_threshold: 0.45
   # Non-maximum suppression IoU threshold
   nms_threshold: 0.45
+  # Run the detector on native-resolution windows cut around motion rather
+  # than on the whole frame stretched to the model input. Measured on 100
+  # labelled crops composited into a live frame from this Pi:
+  #   full frame -> ROI at sensor res:
+  #   House Finch  0/100 -> 38/100
+  #   Squirrel     1/100 -> 55/100
+  #   Cat          2/100 -> 78/100
+  # Needs capture_resolution above; on its own it recovers pests but not
+  # birds (finch reaches only 1/100 without the extra sensor detail).
+  roi_crop: true
+  # Window edge in capture pixels. Matching input_size means the detector
+  # rescales nothing at all.
+  roi_crop_window: 640
+  # Windows per frame. Each one costs a full inference.
+  roi_crop_max_windows: 2
   # Model input size
   input_size: [640, 640]
 

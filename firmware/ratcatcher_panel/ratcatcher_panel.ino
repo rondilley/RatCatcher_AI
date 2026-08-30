@@ -56,7 +56,12 @@ static const size_t KEY_COUNT = sizeof(KEY_PINS) / sizeof(KEY_PINS[0]);
 
 #define PROTOCOL_VERSION 1
 #define PANEL_MODEL "crowpanel-2.13"
-#define FIRMWARE_VERSION "1.0.0"
+/* 1.2.0 enabled the button pull-ups and reports both edges.
+ * 1.1.0 added the generic "screen" frame. PROTOCOL_VERSION stays at 1:
+ * an unknown frame *type* is ignored below, so a new type is a
+ * backwards-compatible addition, while raising the protocol version
+ * would make this firmware reject every frame an older host sends. */
+#define FIRMWARE_VERSION "1.2.0"
 
 /* Longer than the host's 512-byte limit, so a legal frame always fits
  * and an over-long line is discarded whole rather than parsed in half. */
@@ -95,6 +100,18 @@ static const size_t KEY_COUNT = sizeof(KEY_PINS) / sizeof(KEY_PINS[0]);
 
 #define X_CLOCK_RIGHT 200
 
+/* Generic screen layout. Rows start below the title rule and advance by
+ * a fixed step, so the host decides how many there are and the panel
+ * only has to stop before it runs off the bottom of the 122-pixel
+ * frame. Five rows and three rules is the deepest layout that fits. */
+#define SCREEN_MAX_LINES   6
+#define Y_SCREEN_FIRST    22
+#define SCREEN_LINE_STEP  14
+#define SCREEN_RULE_GAP    5
+#define SCREEN_BAR_HEIGHT  9
+#define SCREEN_BAR_GAP     6
+#define SCREEN_HEIGHT    122
+
 /* ------------------------------------------------------------------ */
 /* State                                                               */
 /* ------------------------------------------------------------------ */
@@ -122,6 +139,10 @@ struct PanelState {
 static PanelState g_state;
 static bool g_haveFrame = false;
 static bool g_stale = false;
+/* Which layout is currently on the glass. The stale fallback needs it:
+ * redrawing the status screen over a focus session would replace live
+ * readings with counts that are themselves out of date. */
+static bool g_lastWasScreen = false;
 static unsigned long g_lastFrameMs = 0;
 static uint16_t g_partialCount = 0;
 
@@ -154,6 +175,42 @@ static void drawTextRight(uint16_t rightEdge, uint16_t y, const char *text, uint
 static void drawRule(uint16_t y) {
   /* WHITE draws black here. See the colour note at the top. */
   EPD_DrawLine(X_LABEL, y, X_RIGHT_EDGE, y, WHITE);
+}
+
+/* Filled progress bar for a 0-100 value.
+ *
+ * Drawn rather than spelled out in hashes because a bar is read at a
+ * glance from arm's length, which is the whole point of putting it on
+ * a panel bolted to the enclosure. WHITE draws black here; see the
+ * colour note at the top. */
+static void drawBar(uint16_t x, uint16_t y, uint16_t width, long percent) {
+  if (width < 4) {
+    return;
+  }
+  if (percent < 0) {
+    percent = 0;
+  }
+  if (percent > 100) {
+    percent = 100;
+  }
+
+  uint16_t right = x + width - 1;
+  uint16_t bottom = y + SCREEN_BAR_HEIGHT - 1;
+
+  /* Outline, so an empty bar is still visibly a bar and not a blank
+   * space that reads as a panel fault. */
+  EPD_DrawLine(x, y, right, y, WHITE);
+  EPD_DrawLine(x, bottom, right, bottom, WHITE);
+  EPD_DrawLine(x, y, x, bottom, WHITE);
+  EPD_DrawLine(right, y, right, bottom, WHITE);
+
+  uint16_t inner = width - 2;
+  uint16_t filled = (uint16_t)(((uint32_t)inner * (uint32_t)percent) / 100UL);
+  for (uint16_t row = y + 2; row + 2 <= bottom; row++) {
+    if (filled > 0) {
+      EPD_DrawLine(x + 1, row, x + filled, row, WHITE);
+    }
+  }
 }
 
 static void drawNumberRight(uint16_t rightEdge, uint16_t y, long value, uint8_t size) {
@@ -295,9 +352,11 @@ static void sendError(const char *message) {
   Serial.print("\"}\n");
 }
 
-static void sendButton(const char *name) {
+static void sendButton(const char *name, bool down) {
   Serial.print("{\"v\":");
   Serial.print(PROTOCOL_VERSION);
+  Serial.print(",\"down\":");
+  Serial.print(down ? 1 : 0);
   Serial.print(",\"t\":\"btn\",\"id\":\"");
   Serial.print(name);
   Serial.print("\"}\n");
@@ -321,6 +380,60 @@ static void readCounts(JsonObject counts, const char *key, int row) {
   }
   g_state.seen[row] = pair[0].as<long>();
   g_state.heard[row] = pair[1].as<long>();
+}
+
+/* Draw a generic screen straight from the parsed frame.
+ *
+ * Nothing is copied into a state struct first, unlike the status
+ * screen. There is nothing to redraw it from: the panel does not know
+ * what the rows mean, so it cannot recompute them, and a stale focus
+ * reading is worse than none. The host is the only thing that can say
+ * what belongs here, and it repeats itself twice a second. */
+static void drawScreen(JsonDocument &doc) {
+  clearPage();
+
+  drawText(X_LABEL, Y_HEADER, doc["title"] | "", FONT_BIG);
+  drawRule(Y_RULE_TOP);
+
+  JsonArray lines = doc["l"].as<JsonArray>();
+  if (lines.isNull()) {
+    return;
+  }
+
+  uint16_t y = Y_SCREEN_FIRST;
+  int drawn = 0;
+
+  for (JsonObject line : lines) {
+    if (drawn >= SCREEN_MAX_LINES || y + FONT_SMALL > SCREEN_HEIGHT) {
+      break;
+    }
+
+    const char *text = line["t"] | "";
+    drawText(X_LABEL, y, text, FONT_SMALL);
+
+    if (!line["b"].isNull()) {
+      /* The bar takes whatever the text leaves, so a long label
+       * shortens the bar instead of overprinting it. */
+      uint16_t textWidth = (uint16_t)strlen(text) * (FONT_SMALL / 2);
+      uint16_t barX = X_LABEL + textWidth + SCREEN_BAR_GAP;
+      if (barX < X_RIGHT_EDGE) {
+        drawBar(barX, y + 1, X_RIGHT_EDGE - barX, line["b"] | 0);
+      }
+    }
+
+    y += SCREEN_LINE_STEP;
+    drawn++;
+
+    if ((line["r"] | 0) != 0 && y + SCREEN_RULE_GAP < SCREEN_HEIGHT) {
+      drawRule(y);
+      y += SCREEN_RULE_GAP;
+    }
+  }
+
+  g_haveFrame = true;
+  g_stale = false;
+  g_lastWasScreen = true;
+  g_lastFrameMs = millis();
 }
 
 static void applyStatus(JsonDocument &doc) {
@@ -357,6 +470,7 @@ static void applyStatus(JsonDocument &doc) {
 
   g_haveFrame = true;
   g_stale = false;
+  g_lastWasScreen = false;
   g_lastFrameMs = millis();
 }
 
@@ -382,6 +496,13 @@ static void handleLine(const char *line) {
 
   if (strcmp(type, "ping") == 0) {
     sendHello();
+    return;
+  }
+
+  if (strcmp(type, "screen") == 0) {
+    drawScreen(doc);
+    pushToPanel((doc["full"] | 0) != 0);
+    sendAck(doc["seq"] | 0);
     return;
   }
 
@@ -444,9 +565,10 @@ static void pumpButtons() {
     }
     g_keyChangedMs[index] = nowMs;
     g_keyDown[index] = down;
-    if (down) {
-      sendButton(KEY_NAMES[index]);
-    }
+    /* Both edges. The release is what proves the button came back up,
+     * and a pin stuck down then shows as a press with no matching
+     * release rather than as silence. */
+    sendButton(KEY_NAMES[index], down);
   }
 }
 
@@ -462,7 +584,15 @@ static void checkStale() {
     return;
   }
   g_stale = true;
-  drawStatus();
+  if (g_lastWasScreen) {
+    /* The panel cannot recompute whatever the screen was showing, so it
+     * says the readings stopped rather than leaving numbers that look
+     * live. Redrawing the status screen here would be worse still: its
+     * counts are older than the screen they replaced. */
+    drawSplash("HOST STOPPED SENDING");
+  } else {
+    drawStatus();
+  }
   pushToPanel(true);
 }
 
@@ -479,7 +609,12 @@ void setup() {
   digitalWrite(PIN_EPD_POWER, HIGH);
 
   for (size_t index = 0; index < KEY_COUNT; index++) {
-    pinMode(KEY_PINS[index], INPUT);
+    /* INPUT_PULLUP, not INPUT. The buttons are active low: each one
+     * pulls its pin to ground when pressed, and with no pull-up the
+     * released state floats rather than reading HIGH. Plain INPUT was
+     * why no press was ever reported -- the host received the panel's
+     * hello perfectly well, so the link was never the problem. */
+    pinMode(KEY_PINS[index], INPUT_PULLUP);
   }
 
   memset(&g_state, 0, sizeof(g_state));

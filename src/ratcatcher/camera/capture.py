@@ -10,7 +10,7 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 import cv2
 import numpy as np
@@ -373,8 +373,22 @@ if _PICAMERA2_AVAILABLE:
 
             self._picam = Picamera2(camera_num=self._camera_num)
 
+            # "RGB888" is not a typo, and it is why this comment exists.
+            # libcamera names a format by its byte order in memory, which
+            # numpy then reads back reversed, so picamera2's "RGB888"
+            # hands out BGR arrays and its "BGR888" hands out RGB ones.
+            # This asked for "BGR888" and therefore delivered RGB, while
+            # every consumer -- HailoDetector, the species classifier,
+            # the OpenCV backend's swapRB, cv2.imwrite for thumbnails,
+            # and the clip writer's BGR-to-RGB step for FFmpeg -- treats
+            # a frame as BGR. Red and blue were swapped through the whole
+            # video path, on colour-critical work: the species classifier
+            # separates finches from siskins largely on plumage colour.
+            # Verified against rpicam-still on the same scene, which
+            # writes a correct JPEG: reversed, the correlation is 0.9999;
+            # direct, it is -0.9999.
             config = self._picam.create_video_configuration(
-                main={"size": self._resolution, "format": "BGR888"},
+                main={"size": self._resolution, "format": "RGB888"},
                 controls={"FrameRate": self._fps},
             )
             self._picam.configure(config)
@@ -397,6 +411,24 @@ if _PICAMERA2_AVAILABLE:
             self._running = False
             if self._capture_thread is not None:
                 self._capture_thread.join(timeout=3.0)
+                if self._capture_thread.is_alive():
+                    # Do not close the camera while the capture thread is
+                    # still inside capture_array().  picamera2's close()
+                    # waits on the event loop that the outstanding request
+                    # holds, and the two block each other forever: the
+                    # process logs every loop as ended, never reaches
+                    # "Pipeline stopped", and survives SIGTERM, so systemd
+                    # waits out TimeoutStopSec and reports the unit failed.
+                    # Leaking the device is the cheaper failure -- the
+                    # capture thread is a daemon and stop() is only reached
+                    # on the way out.
+                    logger.warning(
+                        "PicameraSource: camera %d capture thread still "
+                        "running after 3s; leaving the device open rather "
+                        "than deadlocking in close()",
+                        self._camera_num,
+                    )
+                    return
                 self._capture_thread = None
             if self._picam is not None:
                 self._picam.stop()
@@ -415,6 +447,31 @@ if _PICAMERA2_AVAILABLE:
                 # Return a copy so consumers can mutate freely.
                 frame = self._latest_frame.copy()
             return True, frame
+
+        def capture_metadata(self) -> dict[str, Any] | None:
+            """The camera's current control values, or None.
+
+            Not part of the CameraSource protocol: only a real sensor has
+            an exposure time or a lux estimate to report. Callers ask for
+            it by duck-typing and carry on without it, which is what lets
+            the focus tool run against FileSource with no hardware.
+
+            These readings are what separate a lens that is merely out of
+            focus from one that is covered: a blocked camera measured 7.3
+            lux with the gain pinned at 7.9x while the other, in the same
+            daylight, sat at 19242 lux and unity gain.
+            """
+            if self._picam is None:
+                return None
+            try:
+                return dict(self._picam.capture_metadata())
+            except Exception as exc:  # noqa: BLE001 -- diagnostics are optional
+                logger.debug(
+                    "PicameraSource: metadata unavailable on camera %d: %s",
+                    self._camera_num,
+                    exc,
+                )
+                return None
 
         # -- Background capture ---------------------------------------------
 

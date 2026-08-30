@@ -13,10 +13,12 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from ratcatcher.display.protocol import (
+    ScreenFrame,
     StatusFrame,
     decode_line,
     encode_frame,
     encode_ping,
+    encode_screen,
     is_hello,
 )
 
@@ -42,6 +44,14 @@ class StatusPanel(Protocol):
 
     def send(self, frame: StatusFrame) -> bool:
         """Write one frame. Returns False if the link is down."""
+
+    def send_screen(self, frame: ScreenFrame) -> bool:
+        """Write one generic screen. Returns False if the link is down.
+
+        Firmware older than 1.1.0 ignores these frames rather than
+        drawing them, so a caller that needs the screen to appear should
+        check the version reported in the panel's hello.
+        """
 
     def poll(self) -> list[dict[str, Any]]:
         """Return any messages the panel has sent since the last call."""
@@ -79,6 +89,7 @@ class SerialPanel:
         self._rx = bytearray()
         self._next_retry = 0.0
         self._confirmed = False
+        self._firmware: str | None = None
 
     @property
     def description(self) -> str:
@@ -100,6 +111,21 @@ class SerialPanel:
         transmit path is broken draws perfectly well.
         """
         return self._confirmed
+
+    @property
+    def firmware(self) -> str | None:
+        """Firmware version the panel last reported, if it has.
+
+        Lets a caller find out whether the panel understands the frame
+        it is about to be sent. An older firmware ignores an unknown
+        frame type silently, which on a screen that holds its last image
+        is indistinguishable from a host that has stopped sending.
+        """
+        return self._firmware
+
+    def ping(self) -> bool:
+        """Ask the panel to identify itself. The answer arrives via poll."""
+        return self._write(encode_ping())
 
     def open(self) -> None:
         if self.connected:
@@ -158,18 +184,10 @@ class SerialPanel:
             logger.debug("Panel ping failed on open: %s", exc)
 
     def send(self, frame: StatusFrame) -> bool:
-        if not self.connected and not self._try_reconnect():
-            return False
+        return self._write(encode_frame(frame))
 
-        import serial
-
-        try:
-            self._serial.write(encode_frame(frame))
-            return True
-        except (serial.SerialException, serial.SerialTimeoutException, OSError) as exc:
-            logger.warning("Status panel write failed on %s: %s", self._port, exc)
-            self._drop()
-            return False
+    def send_screen(self, frame: ScreenFrame) -> bool:
+        return self._write(encode_screen(frame))
 
     def poll(self) -> list[dict[str, Any]]:
         if not self.connected:
@@ -198,6 +216,8 @@ class SerialPanel:
                 continue
             if is_hello(message):
                 self._confirmed = True
+                firmware = message.get("fw")
+                self._firmware = str(firmware) if firmware is not None else None
                 logger.info(
                     "Status panel identified: firmware %s on %s",
                     message.get("fw", "?"),
@@ -210,6 +230,21 @@ class SerialPanel:
         self._drop()
 
     # -- internals ---------------------------------------------------------
+
+    def _write(self, payload: bytes) -> bool:
+        """Send already-encoded bytes, reconnecting if the link is down."""
+        if not self.connected and not self._try_reconnect():
+            return False
+
+        import serial
+
+        try:
+            self._serial.write(payload)
+            return True
+        except (serial.SerialException, serial.SerialTimeoutException, OSError) as exc:
+            logger.warning("Status panel write failed on %s: %s", self._port, exc)
+            self._drop()
+            return False
 
     def _drop(self) -> None:
         if self._serial is not None:
@@ -257,9 +292,15 @@ class FilePanel:
         logger.info("Status panel writing to %s", self._path)
 
     def send(self, frame: StatusFrame) -> bool:
+        return self._write(encode_frame(frame))
+
+    def send_screen(self, frame: ScreenFrame) -> bool:
+        return self._write(encode_screen(frame))
+
+    def _write(self, payload: bytes) -> bool:
         if self._handle is None:
             return False
-        self._handle.write(encode_frame(frame))
+        self._handle.write(payload)
         self._handle.flush()
         return True
 
@@ -281,6 +322,17 @@ class NullPanel:
 
     def __init__(self) -> None:
         self.frames: list[StatusFrame] = []
+        self.screens: list[ScreenFrame] = []
+        self._pending: list[dict[str, Any]] = []
+
+    def press(self, button: str, *, down: bool = True) -> None:
+        """Queue a button message for the next poll.
+
+        The real panel is the only other source of these, so without it
+        the button paths could only be exercised by hand with a finger
+        on the hardware.
+        """
+        self._pending.append({"v": 1, "t": "btn", "id": button, "down": 1 if down else 0})
 
     @property
     def description(self) -> str:
@@ -290,6 +342,10 @@ class NullPanel:
     def last_frame(self) -> StatusFrame | None:
         return self.frames[-1] if self.frames else None
 
+    @property
+    def last_screen(self) -> ScreenFrame | None:
+        return self.screens[-1] if self.screens else None
+
     def open(self) -> None:
         return None
 
@@ -297,8 +353,13 @@ class NullPanel:
         self.frames.append(frame)
         return True
 
+    def send_screen(self, frame: ScreenFrame) -> bool:
+        self.screens.append(frame)
+        return True
+
     def poll(self) -> list[dict[str, Any]]:
-        return []
+        pending, self._pending = self._pending, []
+        return pending
 
     def close(self) -> None:
         return None

@@ -252,3 +252,61 @@ class TestROIMask:
         assert roi.contains_point(0.0, 0.0) is True
         assert roi.contains_point(0.5, 0.5) is True
         assert roi.contains_point(1.0, 1.0) is True
+
+
+# -- Whole-frame illumination changes ------------------------------------------
+#
+# A cloud crossing the sun, or an auto-exposure step, changes every pixel at
+# once and MOG2 reports it as one region covering nearly the whole frame.
+# Measured on this Pi, that was the only "motion" the cameras produced in 680
+# frames -- so without a ceiling the ROI-crop window degenerates to the full
+# frame, which is exactly what it exists to avoid.
+#
+# cooldown_seconds=0 throughout: settling MOG2 fires motion and arms the
+# cooldown grid, so with the default 2 s these tests would pass on the
+# cooldown rather than on the thing they claim to measure.
+
+
+def _settle(det, frame, n=40):
+    """Let MOG2 learn a stable background."""
+    for _ in range(n):
+        det.detect(frame)
+
+
+def _textured_base():
+    base = np.full((480, 640, 3), 90, dtype=np.uint8)
+    base[::7, ::7] = 200          # texture, so MOG2 has structure to model
+    return base
+
+
+def _brighter(frame, by=60):
+    return np.clip(frame.astype(np.int16) + by, 0, 255).astype(np.uint8)
+
+
+def test_whole_frame_brightness_step_passes_without_a_ceiling():
+    """Establishes what the ceiling is actually suppressing."""
+    det = MotionDetector(MotionConfig(cooldown_seconds=0.0))
+    base = _textured_base()
+    _settle(det, base)
+
+    regions = det.detect(_brighter(base))
+    assert regions != []
+    assert max(r.area for r in regions) > 0.5
+
+
+def test_whole_frame_brightness_step_is_rejected_when_a_ceiling_is_set():
+    det = MotionDetector(MotionConfig(cooldown_seconds=0.0, max_area_pct=0.5))
+    base = _textured_base()
+    _settle(det, base)
+
+    assert det.detect(_brighter(base)) == []
+
+
+def test_a_small_moving_object_still_survives_the_ceiling():
+    det = MotionDetector(MotionConfig(cooldown_seconds=0.0, max_area_pct=0.5))
+    base = _textured_base()
+    _settle(det, base)
+
+    moved = base.copy()
+    cv2.rectangle(moved, (300, 220), (360, 280), (255, 255, 255), -1)
+    assert det.detect(moved) != []

@@ -19,6 +19,12 @@ class CameraConfig:
     enabled: bool = True
     source_type: str = "auto"
     resolution: tuple[int, int] = (1920, 1080)
+    # Sensor readout size, when it should differ from the frame size used
+    # downstream.  The detector needs native-resolution pixels to see a
+    # small animal, but a 4056x3040 BGR frame is 37 MB and must never
+    # reach a queue or the pre-event ring buffer.  None means capture at
+    # ``resolution``, which is what every install did before this existed.
+    capture_resolution: tuple[int, int] | None = None
     fps: int = 30
     file_path: str | None = None
     device_index: int = 0
@@ -35,6 +41,12 @@ class MotionConfig:
     process_height: int = 240
     erode_kernel: int = 3
     dilate_kernel: int = 7
+    # Upper bound on a region, as a fraction of frame area.  A cloud
+    # shadow or an auto-exposure step changes the whole frame at once and
+    # MOG2 reports it as one region covering ~99% of the image; that is an
+    # illumination change, not an animal.  1.0 keeps the old behaviour of
+    # accepting anything.
+    max_area_pct: float = 1.0
     min_area_pct: float = 0.005
     cooldown_seconds: float = 2.0
     learning_rate: float = -1.0
@@ -48,6 +60,13 @@ class DetectionConfig:
     confidence_threshold: float = 0.45
     nms_threshold: float = 0.45
     input_size: tuple[int, int] = (640, 640)
+    # Run the detector on native-resolution windows cut around motion
+    # rather than on the whole frame squeezed to input_size.  A frame
+    # stretched from 1920x1080 to 640x640 shrinks a finch to ~17 px, which
+    # is below the detector's floor; a native window leaves it at ~62 px.
+    roi_crop: bool = False
+    roi_crop_window: int = 640
+    roi_crop_max_windows: int = 2
 
 
 @dataclass(frozen=True)
@@ -294,6 +313,8 @@ def _build_camera_config(raw: dict[str, Any]) -> CameraConfig:
             kwargs[key] = raw[key]
     if "resolution" in raw:
         kwargs["resolution"] = _coerce_tuple(raw["resolution"])
+    if raw.get("capture_resolution") is not None:
+        kwargs["capture_resolution"] = _coerce_tuple(raw["capture_resolution"])
     return CameraConfig(**kwargs)
 
 

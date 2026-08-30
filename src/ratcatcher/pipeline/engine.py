@@ -18,12 +18,14 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 from ratcatcher.camera.capture import CameraSource
 from ratcatcher.camera.frame_buffer import FrameBuffer
 from ratcatcher.camera.platform_camera import create_camera
 from ratcatcher.config import Config
+from ratcatcher.detection.roi_crop import plan_windows
 from ratcatcher.monitoring.events import log_video_detection
 from ratcatcher.motion.detector import MotionDetector
 from ratcatcher.pipeline.event import DetectionEvent
@@ -66,6 +68,7 @@ class PipelineEngine:
         self._storage_queue: queue.Queue = queue.Queue(maxsize=256)
 
         self._cameras: list[CameraSource] = []
+        self._camera_configs: list = []
         self._frame_buffers: list[FrameBuffer] = []
         self._motion_detectors: list[MotionDetector] = []
 
@@ -78,6 +81,10 @@ class PipelineEngine:
         self._stats = {
             "frames_captured": 0,
             "motion_events": 0,
+            # Native-resolution windows cut for the detector. Zero while
+            # motion fires means the ROI path is configured off, or every
+            # region was rejected as an illumination change.
+            "crop_windows": 0,
             "detections": 0,
             "classifications": 0,
             "stored": 0,
@@ -147,6 +154,7 @@ class PipelineEngine:
                 continue
 
             self._cameras.append(camera)
+            self._camera_configs.append(cam_cfg)
 
             buf_frames = cam_cfg.fps * self._config.storage.clip_pre_seconds
             self._frame_buffers.append(FrameBuffer(max_frames=max(buf_frames, 30)))
@@ -254,6 +262,7 @@ class PipelineEngine:
             self._db = None
 
         self._cameras.clear()
+        self._camera_configs.clear()
         self._frame_buffers.clear()
         self._motion_detectors.clear()
         self._threads.clear()
@@ -334,8 +343,18 @@ class PipelineEngine:
 
         logger.info("Camera %d loop started", camera_id)
 
+        cam_cfg = self._camera_configs[cam_index]
+        crop_cfg = self._config.detection
+        # None unless the camera reads out more than the pipeline carries.
+        out_size = (
+            cam_cfg.resolution
+            if cam_cfg.capture_resolution is not None
+            and tuple(cam_cfg.capture_resolution) != tuple(cam_cfg.resolution)
+            else None
+        )
+
         while not self._stop_event.is_set():
-            ok, frame = camera.read()
+            ok, capture = camera.read()
             if not ok:
                 if not camera.is_running:
                     logger.info("Camera %d source exhausted", camera_id)
@@ -344,6 +363,19 @@ class PipelineEngine:
                 continue
 
             now = time.time()
+
+            # Everything downstream -- clips, thumbnails, the species crop
+            # -- works from this one.  The capture frame exists only long
+            # enough to cut detection windows out of it.
+            if out_size is None:
+                frame = capture
+                scale = 1.0
+            else:
+                frame = cv2.resize(
+                    capture, out_size, interpolation=cv2.INTER_AREA
+                )
+                scale = capture.shape[1] / frame.shape[1]
+
             frame_buf.push(frame, now)
 
             with self._stats_lock:
@@ -353,19 +385,41 @@ class PipelineEngine:
                 self._enqueue_for_detection(frame, camera_id, now)
                 continue
 
-            regions = motion_det.detect(frame)
+            regions = motion_det.detect(capture)
             if not regions:
                 continue
 
             with self._stats_lock:
                 self._stats["motion_events"] += 1
 
-            self._enqueue_for_detection(frame, camera_id, now)
+            crops: list[tuple[np.ndarray, int, int]] = []
+            if crop_cfg.roi_crop:
+                for win in plan_windows(
+                    regions,
+                    frame_width=capture.shape[1],
+                    frame_height=capture.shape[0],
+                    window=crop_cfg.roi_crop_window,
+                    max_windows=crop_cfg.roi_crop_max_windows,
+                ):
+                    x, y, w, h = win.bounds
+                    crops.append((capture[y : y + h, x : x + w].copy(), x, y))
+                if crops:
+                    with self._stats_lock:
+                        self._stats["crop_windows"] += len(crops)
+
+            self._enqueue_for_detection(
+                frame, camera_id, now, crops=crops, capture_scale=scale
+            )
 
         logger.info("Camera %d loop ended", camera_id)
 
     def _enqueue_for_detection(
-        self, frame: np.ndarray, camera_id: int, timestamp: float
+        self,
+        frame: np.ndarray,
+        camera_id: int,
+        timestamp: float,
+        crops: list[tuple[np.ndarray, int, int]] | None = None,
+        capture_scale: float = 1.0,
     ) -> None:
         """Push a frame into the detection queue, dropping if full."""
         event = DetectionEvent(
@@ -375,6 +429,8 @@ class PipelineEngine:
             frame_width=frame.shape[1],
             frame_height=frame.shape[0],
             stage="motion",
+            crops=crops or [],
+            capture_scale=capture_scale,
         )
 
         if self._detector is not None:
@@ -406,7 +462,7 @@ class PipelineEngine:
             event: DetectionEvent = item
 
             try:
-                detections = self._detector.detect(event.frame)
+                detections = self._detect_for(event)
             except Exception:
                 logger.exception("Detection error on camera %d", event.camera_id)
                 continue
@@ -447,6 +503,32 @@ class PipelineEngine:
                             self._stats["dropped_frames"] += 1
 
         logger.info("Detection loop ended")
+
+    def _detect_for(self, event: DetectionEvent) -> list:
+        """Detect on an event, using native windows when they are present.
+
+        Without windows this is the original whole-frame call.  With them
+        the detector runs once per window and every box is translated out
+        of window coordinates, through the capture frame, and onto
+        ``event.frame`` -- which is what the classifier crop, the
+        thumbnail and the stored row all use.
+        """
+        if not event.crops:
+            return self._detector.detect(event.frame)
+
+        inv = 1.0 / event.capture_scale if event.capture_scale else 1.0
+        results = []
+        for crop, off_x, off_y in event.crops:
+            for det in self._detector.detect(crop):
+                bx, by, bw, bh = det.bbox
+                det.bbox = (
+                    int(round((bx + off_x) * inv)),
+                    int(round((by + off_y) * inv)),
+                    int(round(bw * inv)),
+                    int(round(bh * inv)),
+                )
+                results.append(det)
+        return results
 
     def _classification_loop(self) -> None:
         """Run species classification on bird crops."""

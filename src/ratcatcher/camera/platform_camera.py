@@ -92,7 +92,7 @@ def _create_picamera_source(config: CameraConfig) -> CameraSource:
 
     return PicameraSource(
         camera_num=config.device_index,
-        resolution=config.resolution,
+        resolution=config.capture_resolution or config.resolution,
         fps=config.fps,
     )
 

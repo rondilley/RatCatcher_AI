@@ -25,6 +25,15 @@ class DetectionEvent:
     # Stage that produced this event ("motion", "detection", "classification")
     stage: str = "motion"
 
+    # Native-resolution windows cut around motion, each paired with the
+    # offset it was cut from, in capture coordinates.  Present only when
+    # the ROI-crop path is enabled.  ``frame`` stays the downscaled frame
+    # the rest of the pipeline works from -- a full-resolution frame is
+    # 37 MB and must not enter a queue -- so ``capture_scale`` is what maps
+    # a box found in a crop back onto it.
+    crops: list[tuple[np.ndarray, int, int]] = field(default_factory=list)
+    capture_scale: float = 1.0
+
     # From Stage 1 (YOLO detection)
     class_name: str | None = None
     confidence: float | None = None

@@ -187,7 +187,7 @@ install -m 755 packaging/lib/firstboot.sh      "${STAGE}/opt/ratcatcher/lib/"
 install -m 755 scripts/fix_hailo_driver.sh     "${STAGE}/opt/ratcatcher/lib/"
 install -m 755 scripts/download_models.sh      "${STAGE}/opt/ratcatcher/lib/"
 # The panel firmware is not flashed at install time -- the board may not
-# be attached, and the toolchain is a 2.3 GB download a maintainer
+# be attached, and the toolchain is a 7.3 GB download a maintainer
 # script cannot fetch. But DEPLOYMENT.md Step 6b has to be followable
 # from a package-only install, so the tool and the sketch ship here and
 # the operator runs them when the panel is in front of them.
