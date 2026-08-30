@@ -3,7 +3,7 @@
 ## System Overview
 
 RatCatcher AI is a real-time wildlife detection system for outdoor bird
-feeders. It runs on a Raspberry Pi 5 with two cameras and a Hailo-8L AI
+feeders. It runs on a Raspberry Pi 5 with two cameras and a Hailo-8 AI
 accelerator. It detects pest animals, and it identifies bird species by
 Genus and Species.
 
@@ -117,7 +117,7 @@ Three backends do the same work:
 
 | Backend | Hardware | Performance | Use |
 |---|---|---|---|
-| HailoDetector | Hailo-8L NPU | ~35 FPS for each camera | Production (RPi5) |
+| HailoDetector | Hailo-8 NPU | ~35 FPS for each camera | Production (RPi5) |
 | NCNNDetector | ARM CPU | ~12 FPS | RPi5 with no Hailo |
 | OpenCVDetector | All CPUs | ~4-8 FPS | Development (Linux x86-64) |
 
@@ -520,7 +520,7 @@ flowchart LR
     A["backend=auto"] --> H["Hailo"]
     H -- "not available" --> N["NCNN"]
     N -- "not available" --> O["OpenCV DNN"]
-    HB["backend=hailo"] --> HD["HailoDetector<br/>RPi + Hailo-8L only"]
+    HB["backend=hailo"] --> HD["HailoDetector<br/>RPi + Hailo-8 only"]
     NB["backend=ncnn"] --> ND["NCNNDetector<br/>needs the ncnn package"]
     OB["backend=opencv_dnn"] --> OD["OpenCVDetector<br/>always available"]
 ```

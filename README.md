@@ -7,7 +7,7 @@ animals (squirrels, rats, cats) in real-time on a Raspberry Pi 5.
 ## How It Works
 
 Two cameras look at the bird feeders continuously. When the system
-detects movement, a YOLO object detector on a Hailo-8L NPU classifies
+detects movement, a YOLO object detector on a Hailo-8 NPU classifies
 the visitor as a bird or as a pest. The detector operates at
 approximately 35 FPS. Birds then go to a MobileNet V2 species
 classifier, which identifies the species from 965 known birds. The
@@ -79,12 +79,46 @@ flowchart LR
 | Component | Model | Purpose |
 |---|---|---|
 | Computer | Raspberry Pi 5 (4GB) | Main controller |
-| Cameras | 2x Arducam UC-517 B0270 | IMX477 12MP, IR-Cut for day and night |
-| AI Accelerator | Hailo-8L AI HAT+ (13 TOPS) | Real-time object detection |
+| Cameras | 2x Arducam IMX477 HQ, 6mm CS lens | 12MP, IR-Cut for day and night |
+| AI Accelerator | Raspberry Pi AI HAT+, Hailo-8 (26 TOPS) | Real-time object detection |
 | Microphones | 2x Adafruit 3421 (SPH0645LM4H) | I2S MEMS, bird song capture, shared bus |
 | Status display | Elecrow CrowPanel ESP32 2.13" e-paper | Counts and health, through USB |
-| Power | UPS HAT + solar panel | Continuous outdoor power |
-| Enclosure | IP65 weatherproof | Outdoor deployment |
+| Power | Waveshare UPS HAT (E) + solar panel | Continuous outdoor power |
+| Enclosure | IP65 weatherproof, fan and thermostat | Outdoor deployment |
+
+### Bill of Materials
+
+The parts actually used to build this, including the one that did not
+work out.
+
+| Qty | Part |
+|---|---|
+| 1 | iRasptek Basic Kit for Raspberry Pi 5, 4GB RAM, with Pi 5 case and active cooler |
+| 1 | Raspberry Pi AI HAT+ add-on board, 26 TOPS, PCIe, 65 x 56.5 mm |
+| 1 | Waveshare UPS HAT (E), bi-directional fast charging, 5V 6A output, pogo pin connector |
+| 2 | Adafruit I2S MEMS Microphone Breakout, SPH0645LM4H (3421) |
+| 2 | Arducam IMX477 Pi HQ Camera, with a 1/2.3" 6 mm focal length CS lens |
+| 1 | Elecrow ESP32 E-Ink display, 2.13", black/white HMI e-paper |
+| 1 | SANHLSKJ removable double-sided adhesive pads, 3 mm EVA foam mounting tape (60 pcs) |
+| 1 | IP67 waterproof acoustic vent membrane (microphone ports) |
+| 1 | ~~QILIPSU UL94-V0 outdoor box, 8.3 x 6.3 x 3.9", IP66, clear hinged door~~ **too small, too hot** |
+| 1 | Akwscyby outdoor electrical box, clear window, thermostat and fan, 0.1F control, IP65 |
+
+Notes from building it:
+
+- **The first enclosure did not work.** An 8.3 x 6.3 x 3.9" sealed box has
+  neither the room nor the thermal headroom for a Pi 5, an AI HAT+, a UPS
+  HAT and two cameras. The replacement has a thermostat and a fan, which
+  is what a sealed box running an NPU actually needs.
+- **The lens is 6 mm and fixed.** There is no software focus control for
+  it -- libcamera exposes no `LensPosition` and no autofocus -- so focus
+  is a ring turned by hand. See [Setting the Lenses](#setting-the-lenses).
+  The 6 mm focal length also sets how much of a bird lands on the sensor
+  at a given range, which is the binding constraint on species ID; see
+  the sizing table in that section.
+- **The acoustic vent membrane is for the microphone ports.** The
+  SPH0645 is a MEMS part with an open port, and water on that port
+  destroys it.
 
 ## Quick Start (Development)
 
@@ -325,10 +359,10 @@ sudo systemctl start ratcatcher
 ### Object Detection (Stage 1)
 - **Model:** YOLOv8n custom-trained on Open Images V7 (11.7 MB ONNX)
 - **File:** `models/ratcatcher_best.onnx`
-- **Backends:** Hailo-8L NPU (production), NCNN (CPU fallback), OpenCV DNN (universal fallback)
+- **Backends:** Hailo-8 NPU (production), NCNN (CPU fallback), OpenCV DNN (universal fallback)
 - **Classes:** bird, squirrel, rat, cat, unknown_animal
 - **Trained metrics:** mAP@0.5 = 0.751 (squirrel 0.957, cat 0.896, rat 0.762, bird 0.608)
-- **Performance:** ~35 FPS for each camera on the Hailo-8L. Approximately 9-15 FPS on the CPU
+- **Performance:** ~35 FPS for each camera on the Hailo-8. Approximately 9-15 FPS on the CPU
 
 ### Species Classification (Stage 2)
 - **Model:** MobileNet V2 iNaturalist Bird Classifier (INT8 quantized)
@@ -433,7 +467,7 @@ Squirrel, Norway Rat, Roof Rat, House Mouse, Raccoon, Opossum, Cat.
 
 | Platform | Camera | Detection | Classification | Audio |
 |---|---|---|---|---|
-| RPi5, production | Picamera2 | Hailo-8L NPU | ai-edge-litert | ALSA / I2S mics |
+| RPi5, production | Picamera2 | Hailo-8 NPU | ai-edge-litert | ALSA / I2S mics |
 | RPi5, no Hailo | Picamera2 | NCNN (CPU) | ai-edge-litert | ALSA / I2S mics |
 | Linux x86-64, development | FileSource / Webcam | OpenCV DNN | ai-edge-litert | WAV file source |
 

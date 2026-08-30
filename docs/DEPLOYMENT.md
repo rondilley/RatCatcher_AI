@@ -8,7 +8,7 @@
 |---|---|---|
 | Raspberry Pi 5 (4GB) | | 8GB is also satisfactory |
 | Arducam UC-517 B0270 (x2) | B0270 | The IR-Cut type, for day and night |
-| Hailo-8L AI HAT+ | SC1166 | 13 TOPS, on the GPIO header |
+| Raspberry Pi AI HAT+ (Hailo-8) | | 26 TOPS, on the GPIO header |
 | Adafruit I2S MEMS Microphone Breakout (x2) | 3421 | SPH0645LM4H, shared I2S bus |
 | Elecrow CrowPanel ESP32 2.13" e-paper | | Optional status display, USB-C |
 | UPS HAT | | Model-specific, refer below |
@@ -25,7 +25,7 @@ flowchart TB
     S1["1. Flash Raspberry Pi OS<br/>Bookworm Lite, 64-bit"]
     S2["2. Mount the RPi5 on standoffs<br/>in the enclosure"]
     S3["3. Attach the active cooler"]
-    S4["4. Seat the Hailo-8L AI HAT+<br/>on the GPIO header"]
+    S4["4. Seat the AI HAT+ (Hailo-8)<br/>on the GPIO header"]
     S5["5. Connect the two cameras<br/>22-pin FFC to CAM0 and CAM1"]
     S6["6. Mount the UPS HAT"]
     S7["7. Wire the two I2S microphones<br/>refer to Microphone Wiring"]
@@ -318,7 +318,7 @@ After the reboot, make sure that the device answers:
 
 ```bash
 hailortcli fw-control identify
-# This must show the Hailo-8L device data
+# This must show the Hailo-8 device data
 ```
 
 ### Step 5: Download the Models
