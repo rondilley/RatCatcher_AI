@@ -153,6 +153,7 @@ class StatusReporter:
             data_dir=self._config.data_path,
             temp_warning_c=self._config.monitoring.temp_warning_c,
             temp_critical_c=self._config.monitoring.temp_critical_c,
+            battery=self._config.battery,
         )
 
         log_status(
@@ -164,6 +165,9 @@ class StatusReporter:
             temp_c=health.cpu_temp_c,
             disk_pct=health.disk_usage_pct,
             uptime=format_uptime(health.uptime_seconds),
+            power=health.power_source,
+            batt_pct=health.battery_percent,
+            batt_v=health.battery_volts,
         )
         self._reports_sent += 1
         return True

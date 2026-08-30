@@ -61,7 +61,7 @@ static const size_t KEY_COUNT = sizeof(KEY_PINS) / sizeof(KEY_PINS[0]);
  * an unknown frame *type* is ignored below, so a new type is a
  * backwards-compatible addition, while raising the protocol version
  * would make this firmware reject every frame an older host sends. */
-#define FIRMWARE_VERSION "1.2.0"
+#define FIRMWARE_VERSION "1.3.0"
 
 /* Longer than the host's 512-byte limit, so a legal frame always fits
  * and an over-long line is discarded whole rather than parsed in half. */
@@ -134,6 +134,9 @@ struct PanelState {
   bool hasDisk;
   long diskPct;
   char uptime[8];
+  bool hasBatt;
+  long battPct;
+  bool onBattery;
 };
 
 static PanelState g_state;
@@ -279,6 +282,19 @@ static void drawStatus() {
                       g_state.cameras,
                       g_state.npu ? "ok" : "--",
                       g_state.audio ? "on" : "--");
+  /* Battery is drawn only while the system is running on it. This
+   * footer already exceeds the 41 characters the 6-pixel font fits, so a
+   * field shown unconditionally would push the uptime past the bounds
+   * check to report a figure that means "nothing is wrong" almost all of
+   * the time. A low charge on mains still reaches the glass: it raises a
+   * host-side health warning, which is what turns the state word to
+   * WARN. _system_line in render.py makes the same choice and the two
+   * are one design. */
+  if (g_state.onBattery && g_state.hasBatt && used > 0 &&
+      used < (int)sizeof(footer)) {
+    used += snprintf(footer + used, sizeof(footer) - used, "  BAT %ld%%",
+                     g_state.battPct);
+  }
   if (g_state.hasTemp && used > 0 && used < (int)sizeof(footer)) {
     used += snprintf(footer + used, sizeof(footer) - used, "  %ldC", g_state.tempC);
   }
@@ -465,6 +481,11 @@ static void applyStatus(JsonDocument &doc) {
     g_state.tempC = system["temp"] | 0;
     g_state.hasDisk = !system["disk"].isNull();
     g_state.diskPct = system["disk"] | 0;
+    /* Absent from any host older than the battery telemetry, and null on
+     * a Pi with no UPS HAT fitted. Both read as "no battery to draw". */
+    g_state.hasBatt = !system["bat"].isNull();
+    g_state.battPct = system["bat"] | 0;
+    g_state.onBattery = (system["obat"] | 0) != 0;
     copyString(g_state.uptime, sizeof(g_state.uptime), system["up"] | "?");
   }
 

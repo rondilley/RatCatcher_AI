@@ -411,6 +411,37 @@ def _cmd_run(args: argparse.Namespace) -> int:
     else:
         print("Syslog: disabled")
 
+    # Independent for the same reason again: a UPS that stops answering
+    # must not be able to stop the cameras. It does not hold a reference
+    # to the engine even for the shutdown path -- see monitoring/power.py.
+    battery_monitor = None
+    if config.battery.enabled:
+        from ratcatcher.monitoring.power import BatteryMonitor
+
+        battery_monitor = BatteryMonitor(config)
+        try:
+            # Read once before the thread exists rather than after. The
+            # loop polls immediately on entry, so starting first and then
+            # reading here would put two threads on one I2C client and
+            # one database handle for the sake of a startup line.
+            battery_monitor.open()
+            reading = battery_monitor.poll_once()
+            if reading is None:
+                print("Battery: no UPS HAT found on I2C, continuing without one")
+                battery_monitor.close()
+                battery_monitor = None
+            else:
+                print(
+                    f"Battery: {reading.percent}% "
+                    f"({reading.pack_volts:.2f}V, {reading.power_source})"
+                )
+                battery_monitor.start()
+        except (RuntimeError, OSError) as exc:
+            print(f"WARNING: battery monitoring disabled -- {exc}", file=sys.stderr)
+            battery_monitor = None
+    else:
+        print("Battery: disabled")
+
     try:
         engine.start(
             camera_ids=args.cameras,
@@ -423,6 +454,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         engine.stop()
     finally:
+        if battery_monitor is not None:
+            battery_monitor.stop()
         if status_reporter is not None:
             status_reporter.stop()
         if display_engine is not None:
@@ -438,6 +471,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
         print(f"Panel stats:   {display_engine.stats}")
     if status_reporter is not None:
         print(f"Syslog stats:  {status_reporter.stats}")
+    if battery_monitor is not None:
+        print(f"Battery stats: {battery_monitor.stats}")
     return 0
 
 
@@ -542,7 +577,64 @@ def _cmd_health(args: argparse.Namespace) -> int:
         except (FileNotFoundError, ValueError, PermissionError):
             print("CPU Temperature: unavailable")
 
+    _print_battery()
+
     return 0
+
+
+def _print_battery() -> None:
+    """Report the UPS, or say plainly that there is not one.
+
+    Reads the configured bus and address when a config can be loaded, so
+    a non-default address is honoured here as well as in the service,
+    and falls back to the defaults when it cannot -- this command has to
+    keep working on a machine whose config is the thing that is broken.
+    """
+    from ratcatcher.monitoring.battery import (
+        DEFAULT_I2C_ADDRESS,
+        DEFAULT_I2C_BUS,
+        read_battery,
+    )
+
+    bus, address = DEFAULT_I2C_BUS, DEFAULT_I2C_ADDRESS
+    try:
+        from ratcatcher.config import load_config
+
+        battery_config = load_config().battery
+        if not battery_config.enabled:
+            print("Battery: disabled in configuration")
+            return
+        bus, address = battery_config.i2c_bus, battery_config.i2c_address
+    except (FileNotFoundError, ValueError, OSError):
+        pass
+
+    reading = read_battery(bus=bus, address=address)
+    if reading is None:
+        print(f"Battery: no UPS HAT answering at /dev/i2c-{bus} 0x{address:02x}")
+        return
+
+    print(
+        f"Battery: {reading.percent}% on {reading.power_source} "
+        f"({reading.pack_volts:.2f} V, {reading.pack_ma:+d} mA, "
+        f"{reading.remaining_mah} mAh, {reading.charge_state_name})"
+    )
+    cells = ", ".join(f"{mv / 1000:.3f}" for mv in reading.cells_mv)
+    spread = max(reading.cells_mv) - min(reading.cells_mv)
+    print(f"  Cells: {cells} V  (spread {spread} mV)")
+    print(
+        f"  Input: {reading.vbus_volts:.2f} V, {reading.vbus_ma} mA, "
+        f"{reading.vbus_mw / 1000:.2f} W"
+    )
+    if reading.minutes_to_empty is not None:
+        print(f"  Remaining: {reading.minutes_to_empty} min to empty")
+    if reading.minutes_to_full is not None:
+        print(f"  Charging: {reading.minutes_to_full} min to full")
+    if not reading.healthy:
+        print(
+            f"  WARNING: HAT comms -- fuel gauge "
+            f"{'ok' if reading.gauge_ok else 'LOST'}, charger "
+            f"{'ok' if reading.charger_ok else 'LOST'}"
+        )
 
 
 def _cmd_test_mic(args: argparse.Namespace) -> int:

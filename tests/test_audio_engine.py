@@ -13,6 +13,7 @@ behaviour explicitly, since that is what a fresh checkout does before
 from __future__ import annotations
 
 import dataclasses
+import logging
 import wave
 
 import numpy as np
@@ -227,7 +228,10 @@ class TestAudioEngine:
         quiet_engine = AudioEngine(quiet)
         _run_to_completion(quiet_engine)
 
-        assert quiet_engine.stats["identifications"] < busy_engine.stats["identifications"]
+        # windows_stored, not identifications: cooldown suppresses rows
+        # whether or not BirdNET could name what was in them, and a
+        # synthetic tone is not guaranteed to be named at all.
+        assert quiet_engine.stats["windows_stored"] < busy_engine.stats["windows_stored"]
 
     def test_mono_mode_collapses_the_channels(self, tmp_path):
         wav = tmp_path / "in.wav"
@@ -256,6 +260,49 @@ class TestAudioEngine:
 
         assert rows
         assert all(row["species"] is None for row in rows)
+
+    def test_unmatched_windows_are_not_counted_as_identifications(self, tmp_path):
+        """A stored row is not an identification.
+
+        With no model every gated window is stored and none names a
+        species, which is the case that used to report one identification
+        per window on a night the microphones named nothing.
+        """
+        wav = tmp_path / "in.wav"
+        _write_wav(wav, _stereo_recording())
+        config = _config(tmp_path, wav, model_path="does_not_exist.tflite")
+
+        engine = AudioEngine(config)
+        _run_to_completion(engine)
+
+        assert engine.stats["windows_stored"] > 0
+        assert engine.stats["identifications"] == 0
+
+    def test_unmatched_windows_are_not_logged_at_info(self, tmp_path, caplog):
+        """A window that named nothing is not a sighting.
+
+        The gate is permissive by design, so on a quiet night the windows
+        that match nothing are most of the stream and at info level they
+        bury the identifications. The measurement still goes out at debug,
+        which is what the gate is retuned against.
+        """
+        wav = tmp_path / "in.wav"
+        _write_wav(wav, _stereo_recording())
+        config = _config(tmp_path, wav, model_path="does_not_exist.tflite")
+
+        with caplog.at_level(
+            logging.DEBUG, logger="ratcatcher.pipeline.audio_engine"
+        ):
+            engine = AudioEngine(config)
+            _run_to_completion(engine)
+
+        unmatched = [
+            record
+            for record in caplog.records
+            if "no species match" in record.getMessage()
+        ]
+        assert unmatched, "recording must contain a window that matched nothing"
+        assert all(record.levelno < logging.INFO for record in unmatched)
 
     def test_missing_source_raises_rather_than_hanging(self, tmp_path):
         config = _config(tmp_path, tmp_path / "absent.wav")

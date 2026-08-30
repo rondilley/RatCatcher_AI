@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ratcatcher"
-version = "0.3.1"
+version = "0.4.0"
 description = "Wildlife detection system for bird feeders using neural networks on Raspberry Pi 5"
 requires-python = ">=3.11"
 license = "GPL-3.0-or-later"
@@ -29,6 +29,13 @@ audio = [
 display = [
     # Serial link to the Elecrow CrowPanel e-paper status panel.
     "pyserial>=3.5",
+]
+ups = [
+    # I2C link to the Waveshare UPS HAT (E) battery telemetry. On the Pi
+    # this comes from the apt package python3-smbus2 and is reached
+    # through the venv's system site packages, the same way picamera2 and
+    # hailo_platform are; the extra is for development installs.
+    "smbus2>=0.4",
 ]
 dev = [
     "pytest>=7.0",

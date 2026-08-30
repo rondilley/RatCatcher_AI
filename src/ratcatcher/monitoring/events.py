@@ -239,11 +239,18 @@ def log_status(
     temp_c: float | None = None,
     disk_pct: float | None = None,
     uptime: str | None = None,
+    power: str | None = None,
+    batt_pct: int | None = None,
+    batt_v: float | None = None,
 ) -> None:
     """Report the running totals and the state of the hardware.
 
     ``counts`` is the same CategoryCounts the status panel draws from,
     so the two readings agree by construction rather than by care.
+
+    The battery fields are dropped when there is no UPS HAT to read, so
+    a machine without one emits exactly the line it emitted before they
+    existed rather than three empty tokens.
     """
     event_logger.info(
         "status %s",
@@ -259,11 +266,55 @@ def log_status(
             cameras=cameras,
             npu=npu,
             audio=audio,
+            power=power,
+            batt_pct=batt_pct,
+            batt_v=batt_v,
             temp_c=temp_c,
             disk_pct=disk_pct,
             uptime=uptime,
         ),
     )
+
+
+# The three things worth saying about power, as one record shape rather
+# than three. A parser learns "power" once and reads the event field.
+POWER_ON_BATTERY = "on_battery"
+POWER_ON_MAINS = "on_mains"
+POWER_SHUTDOWN = "shutdown"
+
+
+def log_power(
+    *,
+    event: str,
+    percent: int | None = None,
+    pack_v: float | None = None,
+    minutes_remaining: int | None = None,
+    reason: str | None = None,
+) -> None:
+    """Report a change in how the system is being powered.
+
+    Sent the moment the change is seen rather than folded into the next
+    status line. The status interval is five minutes by default, and on
+    a pack measured at 5-7 hours that is a fifth of the useful warning
+    time spent saying nothing -- and a short outage could begin and end
+    entirely between two status lines, leaving no record that it
+    happened at all.
+
+    Losing mains and shutting down are warnings; regaining mains is not.
+    A stream filtered to warnings should carry the outage and its
+    consequence without also carrying the recovery.
+    """
+    line = format_fields(
+        event=event,
+        batt_pct=percent,
+        batt_v=pack_v,
+        minutes=minutes_remaining,
+        reason=reason,
+    )
+    if event == POWER_ON_MAINS:
+        event_logger.info("power %s", line)
+    else:
+        event_logger.warning("power %s", line)
 
 
 def _encode(value: Any) -> str:

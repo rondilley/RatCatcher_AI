@@ -31,8 +31,26 @@ class DetectionEvent:
     # the rest of the pipeline works from -- a full-resolution frame is
     # 37 MB and must not enter a queue -- so ``capture_scale`` is what maps
     # a box found in a crop back onto it.
+    #
+    # Two scales, not one: the capture and the frame need not share an
+    # aspect ratio, and with the shipped config they do not (4056x3040
+    # into 1920x1080 divides x by 2.113 and y by 2.815).  A single
+    # width-derived scale made every box 1.33x too tall and put anything
+    # below capture y=2282 off the bottom of the frame entirely.
     crops: list[tuple[np.ndarray, int, int]] = field(default_factory=list)
-    capture_scale: float = 1.0
+    capture_scale: tuple[float, float] = (1.0, 1.0)
+
+    # Native-resolution pixels around ``bbox``, cut from the window the
+    # detection was found in, at detection time.  The thumbnail is
+    # written from this rather than from ``frame``: a House Finch is
+    # about 62 px tall in the capture and 3.7 px in a 320-wide thumbnail
+    # of the whole frame, which is smaller than one JPEG block.  None
+    # for whole-frame and motion-only events, which fall back to
+    # ``frame``.  Bounded by construction -- at most one window, and
+    # normally 256x256 -- because ``crops`` itself must not travel this
+    # far: ``storage_queue`` holds 256 events.
+    detail: np.ndarray | None = None
+    detail_bbox: tuple[int, int, int, int] | None = None
 
     # From Stage 1 (YOLO detection)
     class_name: str | None = None

@@ -9,6 +9,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from ratcatcher.config import BatteryConfig
+from ratcatcher.monitoring.battery import read_battery
+
 logger = logging.getLogger(__name__)
 
 
@@ -27,6 +30,12 @@ class HealthReport:
     hailo_available: bool = False
     cameras_connected: int = 0
     uptime_seconds: float | None = None
+    # None on a machine with no UPS HAT fitted, which is how every
+    # other optional reading here reports its absence.
+    battery_percent: int | None = None
+    battery_volts: float | None = None
+    battery_minutes_remaining: int | None = None
+    power_source: str | None = None
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -46,6 +55,7 @@ def check_health(
     data_dir: Path | None = None,
     temp_warning_c: float = 75.0,
     temp_critical_c: float = 82.0,
+    battery: BatteryConfig | None = None,
 ) -> HealthReport:
     """Collect system health metrics.
 
@@ -85,7 +95,54 @@ def check_health(
     report.hailo_available = _check_hailo()
     report.uptime_seconds = _read_uptime()
 
+    if battery is not None and battery.enabled:
+        _add_battery(report, battery)
+
     return report
+
+
+def _add_battery(report: HealthReport, config: BatteryConfig) -> None:
+    """Fill in the UPS readings and warn on what they say.
+
+    Running from the pack is a warning in its own right, separate from
+    the charge level: at 100% on battery nothing is wrong with the
+    battery and everything is wrong with the mains, and that is the
+    condition worth surfacing first.
+    """
+    reading = read_battery(bus=config.i2c_bus, address=config.i2c_address)
+    if reading is None:
+        return
+
+    report.battery_percent = reading.percent
+    report.battery_volts = reading.pack_volts
+    report.power_source = reading.power_source
+    report.battery_minutes_remaining = reading.minutes_to_empty
+
+    if reading.on_battery:
+        remaining = (
+            f", {reading.minutes_to_empty} min remaining"
+            if reading.minutes_to_empty is not None
+            else ""
+        )
+        report.warnings.append(
+            f"Running on battery: {reading.percent}%{remaining}"
+        )
+    elif reading.percent < config.warn_percent:
+        report.warnings.append(f"Battery low: {reading.percent}%")
+
+    # The HAT is a bridge, not the gauge. When it says it has lost the
+    # chip behind it, the numbers above are the last ones it managed to
+    # read rather than the current state, and saying so is the whole
+    # value of the register.
+    if not reading.healthy:
+        lost = []
+        if not reading.gauge_ok:
+            lost.append("fuel gauge")
+        if not reading.charger_ok:
+            lost.append("charger")
+        report.warnings.append(
+            f"UPS HAT has lost contact with its {' and '.join(lost)}"
+        )
 
 
 def _read_cpu_temp() -> float | None:

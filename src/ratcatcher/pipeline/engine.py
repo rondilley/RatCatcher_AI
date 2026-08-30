@@ -37,6 +37,40 @@ logger = logging.getLogger(__name__)
 
 _SENTINEL = object()
 
+# Detail-patch geometry, in native window pixels.  The patch is what the
+# thumbnail is written from, so it has to hold the animal at a size a
+# person can judge: at this feeder a House Finch is about 62 px tall in
+# the capture, which a 320-wide thumbnail of the whole 1920x1080 frame
+# reduces to 3.7 px -- under one 8x8 JPEG block.  Twice the box gives
+# enough surroundings to read what the animal is standing on, and the
+# floor keeps a small bird from yielding a patch too small to see.
+_DETAIL_PAD = 2.0
+_DETAIL_MIN = 256
+
+
+def _cut_detail(
+    window: np.ndarray, bbox: tuple[int, int, int, int]
+) -> tuple[np.ndarray, tuple[int, int, int, int]]:
+    """Cut a square of native pixels around *bbox* out of *window*.
+
+    Both are in window coordinates.  Returns the patch and the box
+    expressed relative to it.  The patch is copied rather than sliced:
+    a numpy view would keep the whole 1.2 MB window alive for as long as
+    the event sits in a queue, which is the cost this exists to avoid.
+    """
+    win_h, win_w = window.shape[:2]
+    bx, by, bw, bh = bbox
+
+    side = int(min(win_w, win_h, max(_DETAIL_MIN, max(bw, bh) * _DETAIL_PAD)))
+
+    x0 = int(round(bx + bw / 2 - side / 2))
+    y0 = int(round(by + bh / 2 - side / 2))
+    x0 = max(0, min(x0, win_w - side))
+    y0 = max(0, min(y0, win_h - side))
+
+    patch = window[y0 : y0 + side, x0 : x0 + side].copy()
+    return patch, (bx - x0, by - y0, bw, bh)
+
 
 class PipelineEngine:
     """Multi-camera wildlife detection pipeline.
@@ -349,6 +383,7 @@ class PipelineEngine:
         interval = 1.0 / max(camera.fps, 1)
 
         logger.info("Camera %d loop started", camera_id)
+        logged_scale = False
 
         cam_cfg = self._camera_configs[cam_index]
         crop_cfg = self._config.detection
@@ -371,17 +406,35 @@ class PipelineEngine:
 
             now = time.time()
 
-            # Everything downstream -- clips, thumbnails, the species crop
-            # -- works from this one.  The capture frame exists only long
-            # enough to cut detection windows out of it.
+            # Everything downstream -- clips, the species crop, the
+            # stored row -- works from this one.  The capture frame
+            # exists only long enough to cut detection windows out of
+            # it, and the thumbnail is written from a patch of one of
+            # those windows rather than from here.
             if out_size is None:
                 frame = capture
-                scale = 1.0
+                scale = (1.0, 1.0)
             else:
                 frame = cv2.resize(
                     capture, out_size, interpolation=cv2.INTER_AREA
                 )
-                scale = capture.shape[1] / frame.shape[1]
+                # Per axis.  The two resolutions need not share an aspect
+                # ratio, and a single width-derived scale silently
+                # stretched every box vertically -- see the note on
+                # DetectionEvent.capture_scale.
+                scale = (
+                    capture.shape[1] / frame.shape[1],
+                    capture.shape[0] / frame.shape[0],
+                )
+                if not logged_scale:
+                    logger.info(
+                        "Camera %d downscale %dx%d -> %dx%d, scale %.3f/%.3f",
+                        camera_id,
+                        capture.shape[1], capture.shape[0],
+                        frame.shape[1], frame.shape[0],
+                        scale[0], scale[1],
+                    )
+                    logged_scale = True
 
             frame_buf.push(frame, now)
 
@@ -477,7 +530,7 @@ class PipelineEngine:
             if not detections:
                 continue
 
-            for det in detections:
+            for det, detail, detail_bbox in detections:
                 det_event = DetectionEvent(
                     timestamp=event.timestamp,
                     camera_id=event.camera_id,
@@ -488,6 +541,8 @@ class PipelineEngine:
                     class_name=det.class_name,
                     confidence=det.confidence,
                     bbox=det.bbox,
+                    detail=detail,
+                    detail_bbox=detail_bbox,
                 )
 
                 with self._stats_lock:
@@ -517,24 +572,35 @@ class PipelineEngine:
         Without windows this is the original whole-frame call.  With them
         the detector runs once per window and every box is translated out
         of window coordinates, through the capture frame, and onto
-        ``event.frame`` -- which is what the classifier crop, the
-        thumbnail and the stored row all use.
+        ``event.frame`` -- which is what the classifier crop and the
+        stored row use.
+
+        Returns ``(detection, detail, detail_bbox)`` per hit.  The detail
+        patch is cut here because this is the only place that holds both
+        the native window and the box in window coordinates; carrying the
+        windows onward instead is not an option, as ``storage_queue``
+        holds 256 events and each window is 1.2 MB.  It is None for the
+        whole-frame path, which has no native pixels to offer.
         """
         if not event.crops:
-            return self._detector.detect(event.frame)
+            return [(det, None, None) for det in self._detector.detect(event.frame)]
 
-        inv = 1.0 / event.capture_scale if event.capture_scale else 1.0
+        scale_x, scale_y = event.capture_scale
+        inv_x = 1.0 / scale_x if scale_x else 1.0
+        inv_y = 1.0 / scale_y if scale_y else 1.0
+
         results = []
         for crop, off_x, off_y in event.crops:
             for det in self._detector.detect(crop):
                 bx, by, bw, bh = det.bbox
+                detail, detail_bbox = _cut_detail(crop, det.bbox)
                 det.bbox = (
-                    int(round((bx + off_x) * inv)),
-                    int(round((by + off_y) * inv)),
-                    int(round(bw * inv)),
-                    int(round(bh * inv)),
+                    int(round((bx + off_x) * inv_x)),
+                    int(round((by + off_y) * inv_y)),
+                    int(round(bw * inv_x)),
+                    int(round(bh * inv_y)),
                 )
-                results.append(det)
+                results.append((det, detail, detail_bbox))
         return results
 
     def _classification_loop(self) -> None:
@@ -614,8 +680,15 @@ class PipelineEngine:
                     f"_{event.class_name or 'unknown'}.jpg"
                 )
                 thumb_path = thumb_dir / thumb_name
+                # Native pixels around the animal when the detection came
+                # from a window, the downscaled frame when it did not
+                # (motion-only rows, or the ROI-crop path turned off).
+                if event.detail is not None:
+                    source, box = event.detail, event.detail_bbox
+                else:
+                    source, box = event.frame, event.bbox
                 try:
-                    create_thumbnail(event.frame, event.bbox, thumb_path)
+                    create_thumbnail(source, box, thumb_path)
                     event.thumbnail_path = str(thumb_path)
                 except Exception:
                     logger.exception("Failed to create thumbnail")

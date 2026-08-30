@@ -28,11 +28,14 @@ def create_thumbnail(
     frame : np.ndarray
         Source image in BGR (OpenCV) format.
     bbox : tuple of (x, y, w, h) or None
-        If provided, a green rectangle is drawn on the thumbnail.
+        If provided, a green rectangle is drawn on the thumbnail.  In
+        *frame* coordinates; it is scaled with the image.
     output_path : Path
         Destination file path for the JPEG.
     max_size : int
-        The longest edge of the thumbnail in pixels (default 320).
+        The longest edge of the thumbnail in pixels (default 320).  A
+        frame already at or below this is written at its own size --
+        upscaling would claim detail the camera did not record.
 
     Returns
     -------
@@ -42,24 +45,32 @@ def create_thumbnail(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Work on a copy so the caller's frame is unmodified.
-    img = frame.copy()
+    # Resize keeping aspect ratio so the longest edge equals max_size,
+    # and never enlarge.
+    src_h, src_w = frame.shape[:2]
+    scale = min(1.0, max_size / max(src_w, src_h))
 
-    # Draw bounding box if supplied.
+    if scale < 1.0:
+        new_w = max(1, int(src_w * scale))
+        new_h = max(1, int(src_h * scale))
+        img = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    else:
+        # Copy so the caller's frame is unmodified by the overlay.
+        new_w, new_h = src_w, src_h
+        img = frame.copy()
+
+    # Draw the box after the resize, not before.  Drawn first, a 2 px
+    # line on a 1920-wide frame survives a 6x reduction as a third of a
+    # pixel of coverage -- a green smear rather than a rectangle.
     if bbox is not None:
         x, y, w, h = bbox
-        cv2.rectangle(img, (x, y), (x + w, y + h), _BBOX_COLOR, _BBOX_THICKNESS)
-
-    # Resize keeping aspect ratio so the longest edge equals max_size.
-    src_h, src_w = img.shape[:2]
-    if src_w >= src_h:
-        scale = max_size / src_w
-    else:
-        scale = max_size / src_h
-
-    new_w = max(1, int(src_w * scale))
-    new_h = max(1, int(src_h * scale))
-    img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        cv2.rectangle(
+            img,
+            (int(round(x * scale)), int(round(y * scale))),
+            (int(round((x + w) * scale)), int(round((y + h) * scale))),
+            _BBOX_COLOR,
+            _BBOX_THICKNESS,
+        )
 
     # Encode and write.
     try:

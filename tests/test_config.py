@@ -81,7 +81,7 @@ class TestCameraConfigFromYaml:
         assert cam0.id == 0
         assert cam0.enabled is True
         assert cam0.source_type == "auto"
-        assert cam0.resolution == (1920, 1080)
+        assert cam0.resolution == (1440, 1080)
         # Full sensor readout, so the detector gets native pixels; 14 fps
         # is the sensor maximum at that size.
         assert cam0.capture_resolution == (4056, 3040)
@@ -93,7 +93,26 @@ class TestCameraConfigFromYaml:
         cam1 = cfg.cameras[1]
         assert cam1.id == 1
         assert cam1.device_index == 1
+        assert cam1.resolution == (1440, 1080)
         assert cam1.capture_resolution == (4056, 3040)
+
+    def test_shipped_resolutions_share_an_aspect_ratio(self) -> None:
+        """The camera loop resizes one to the other, and a resize squashes.
+
+        16:9 against the sensor's 4:3 compressed every animal vertically
+        by a third -- in the clips and in the crop the species classifier
+        reads.  The value assertions above would not catch the pair being
+        changed together into another mismatch.
+        """
+        for cam in load_config(DEFAULT_YAML).cameras:
+            if cam.capture_resolution is None:
+                continue
+            frame = cam.resolution[0] / cam.resolution[1]
+            sensor = cam.capture_resolution[0] / cam.capture_resolution[1]
+            assert frame == pytest.approx(sensor, rel=0.01), (
+                f"camera {cam.id}: {cam.resolution} is not the aspect of "
+                f"{cam.capture_resolution}"
+            )
 
 
 class TestCaptureResolutionIsOptional:

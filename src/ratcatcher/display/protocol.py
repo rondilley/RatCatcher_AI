@@ -93,6 +93,11 @@ class SystemStatus:
     temp_c: float | None = None
     disk_pct: float | None = None
     uptime: str = "?"
+    # None on a machine with no UPS HAT. Both are sent whenever a HAT
+    # answered; whether they are drawn is a layout decision, made in one
+    # place -- see the note on the footer in render.py.
+    batt_pct: int | None = None
+    on_battery: bool = False
 
 
 @dataclass(frozen=True)
@@ -293,6 +298,8 @@ def _payload(frame: StatusFrame, *, include_seq: bool) -> dict[str, Any]:
             "temp": None if system.temp_c is None else round(system.temp_c),
             "disk": None if system.disk_pct is None else round(system.disk_pct),
             "up": system.uptime,
+            "bat": system.batt_pct,
+            "obat": 1 if system.on_battery else 0,
         },
     }
 

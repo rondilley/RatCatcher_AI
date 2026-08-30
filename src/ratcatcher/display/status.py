@@ -83,6 +83,7 @@ def build_status_frame(
         data_dir=config.data_path,
         temp_warning_c=config.monitoring.temp_warning_c,
         temp_critical_c=config.monitoring.temp_critical_c,
+        battery=config.battery,
     )
 
     if cameras is None:
@@ -97,6 +98,8 @@ def build_status_frame(
         temp_c=report.cpu_temp_c,
         disk_pct=report.disk_usage_pct,
         uptime=format_uptime(report.uptime_seconds),
+        batt_pct=report.battery_percent,
+        on_battery=report.power_source == "battery",
     )
 
     if state is None:

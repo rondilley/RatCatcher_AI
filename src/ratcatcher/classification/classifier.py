@@ -148,6 +148,23 @@ class SpeciesClassifier:
         self._taxonomy = taxonomy
         self._input_size = input_size
         self._top_k = max(1, top_k)
+
+        # The model knows 965 classes and the taxonomy maps 50 of them.
+        # Ranking over all 965 and mapping afterwards means the winner is
+        # usually a class this system has no name for -- most often the
+        # model's own "background" class -- which then reaches the
+        # database as a species.  Scoring only the mapped indices asks
+        # the question the caller actually has: which of the species we
+        # know is this, and is that answer strong enough to keep.
+        self._label_indices = np.array(
+            sorted(s.label_index for s in taxonomy.get_all_species()),
+            dtype=np.int64,
+        )
+        if self._label_indices.size == 0:
+            raise ValueError(
+                "Taxonomy maps no label indices; the classifier cannot "
+                "name anything"
+            )
         self._min_confidence = min_confidence
 
         model_file = Path(model_path)
@@ -300,15 +317,25 @@ class SpeciesClassifier:
             # Float model: normalise to [0, 1].
             tensor = rgb.astype(np.float32) / 255.0
         else:
-            # Integer-quantised model: keep uint8 values.  If the model
-            # has non-trivial quantisation parameters, apply them.
-            if self._input_scale > 0.0:
-                tensor = (
-                    (rgb.astype(np.float32) / self._input_scale)
-                    + self._input_zero_point
-                ).astype(self._input_dtype)
-            else:
-                tensor = rgb.astype(self._input_dtype)
+            # Integer-quantised model: pass the raw bytes through.
+            #
+            # scale/zero_point convert between the model's *real* domain
+            # and the quantised one, so quantising requires the real
+            # value first -- and for an image model the real domain is
+            # exactly what the full 0-255 pixel range maps onto.  Writing
+            # that out, q = real/scale + zero_point with
+            # real = (0 - zp)*scale + (rgb/255)*255*scale, collapses to
+            # q = rgb: the identity.  Feeding the raw bytes is correct
+            # for any uint8 image input, whatever its scale and offset.
+            #
+            # Applying the formula to the bytes as if they were already
+            # real values does not merely rescale, it destroys the image.
+            # This model has scale 1/128 and zero_point 128, so
+            # rgb/scale + zp is rgb*128 + 128, which wraps mod 256 to 128
+            # for even pixels and 0 for odd ones -- a tensor holding the
+            # parity bit of each pixel and nothing else.  The model reads
+            # that as "background" with high confidence.
+            tensor = rgb.astype(self._input_dtype)
 
         # Add batch dimension: (H, W, C) -> (1, H, W, C).
         return np.expand_dims(tensor, axis=0)
@@ -316,9 +343,8 @@ class SpeciesClassifier:
     def _dequantize_output(self, raw: np.ndarray) -> np.ndarray:
         """Convert raw output tensor to float32 probabilities.
 
-        If the output is already float the values are assumed to be
-        softmax probabilities.  For quantised outputs the scale and
-        zero-point are applied, and then softmax is computed if needed.
+        Applies scale and zero-point to a quantised output, then softmax
+        only when the values are logits rather than probabilities.
         """
         output = raw.squeeze()  # remove batch dim -> (num_classes,)
 
@@ -331,10 +357,21 @@ class SpeciesClassifier:
                 * self._output_scale
             )
 
-        # If values are not already valid probabilities (i.e. they do
-        # not sum close to 1), apply softmax.
+        # Probabilities are non-negative and sum to at most 1; anything
+        # else is logits and needs softmax.
+        #
+        # The sum cannot be tested for equality with 1.  A quantised
+        # softmax loses mass to rounding: this model has 965 classes at
+        # scale 1/256, so the long tail of near-zero probabilities all
+        # round to zero and the vector sums to about 0.85.  The previous
+        # test required the total to reach 0.99 and so re-applied softmax
+        # to values that were already probabilities, on every frame.
+        # That is not a small error -- softmax over [0, 1] inputs across
+        # 965 classes caps the winner at 1/(1 + 964*e^-1) = 0.0028, far
+        # under any usable threshold, so no crop could ever be
+        # classified.  Under-summing is expected; over-summing is not.
         total = float(np.sum(scores))
-        if total < 0.99 or total > 1.01 or float(np.min(scores)) < 0.0:
+        if float(np.min(scores)) < 0.0 or total > 1.01:
             # Numerically stable softmax.
             shifted = scores - np.max(scores)
             exp_scores = np.exp(shifted)
@@ -348,27 +385,32 @@ class SpeciesClassifier:
         Returns ``None`` when the best prediction is below the
         configured confidence threshold.
         """
-        num_scores = len(scores)
-        k = min(self._top_k, num_scores)
+        # Rank only the classes the taxonomy names.  Scores are left
+        # un-renormalised, so a bird that is not one of these reads as a
+        # low number against every one of them and is correctly rejected
+        # rather than being redistributed into a confident wrong answer.
+        candidates = self._label_indices[self._label_indices < len(scores)]
+        if candidates.size == 0:
+            return None
+
+        candidate_scores = scores[candidates]
+        k = min(self._top_k, candidate_scores.size)
 
         # argpartition is O(n) vs O(n log n) for full sort.
-        top_indices = np.argpartition(scores, -k)[-k:]
+        top_positions = np.argpartition(candidate_scores, -k)[-k:]
         # Sort the top-k by descending score.
-        top_indices = top_indices[np.argsort(scores[top_indices])[::-1]]
+        top_positions = top_positions[
+            np.argsort(candidate_scores[top_positions])[::-1]
+        ]
 
         top_k_list: list[tuple[str, str, float]] = []
-        for idx in top_indices:
-            label_idx = int(idx)
+        for pos in top_positions:
+            label_idx = int(candidates[pos])
             conf = float(scores[label_idx])
             info = self._taxonomy.label_to_species(label_idx)
-            if info is not None:
-                top_k_list.append(
-                    (info.genus_species, info.common_name, conf)
-                )
-            else:
-                top_k_list.append(
-                    (f"unknown_{label_idx}", f"Unknown (index {label_idx})", conf)
-                )
+            # Every candidate index came from the taxonomy, so this
+            # lookup cannot miss.
+            top_k_list.append((info.genus_species, info.common_name, conf))
 
         if not top_k_list:
             return None

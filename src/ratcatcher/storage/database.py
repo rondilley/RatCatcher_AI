@@ -7,6 +7,7 @@ import logging
 import math
 import sqlite3
 from pathlib import Path
+from typing import Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,39 @@ CREATE VIEW IF NOT EXISTS detections_all AS
         confidence   AS confidence,
         clip_path    AS clip_path
     FROM audio_detections;
+
+-- UPS telemetry, sampled on a timer by monitoring/power.py.
+--
+-- Not part of detections_all and deliberately not shaped like a
+-- detection: nothing here names an animal, and the counters that ask
+-- "what was seen" must not be able to reach it.  It answers a different
+-- question, asked over weeks rather than hours -- whether the pack still
+-- reaches full charge, how long an outage actually lasted, and whether
+-- one cell is drifting away from the other three.
+--
+-- Cell voltages are stored as a JSON array rather than four columns
+-- because four is a property of this particular HAT, not of the schema.
+-- SQLite's json_extract reaches into it when the imbalance is what is
+-- being asked about.
+CREATE TABLE IF NOT EXISTS battery_samples (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    percent INTEGER,
+    pack_mv INTEGER,
+    pack_ma INTEGER,
+    remaining_mah INTEGER,
+    vbus_mv INTEGER,
+    vbus_ma INTEGER,
+    vbus_mw INTEGER,
+    minutes_to_empty INTEGER,
+    minutes_to_full INTEGER,
+    power_source TEXT,
+    charge_state TEXT,
+    cells_mv TEXT,
+    gauge_ok INTEGER,
+    charger_ok INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_battery_timestamp ON battery_samples(timestamp);
 """
 
 
@@ -232,6 +266,105 @@ class DetectionDatabase:
             return row_id
         except sqlite3.Error as exc:
             logger.error("Failed to insert audio detection: %s", exc)
+            raise
+
+    def insert_battery_sample(
+        self,
+        *,
+        timestamp: str,
+        percent: int | None = None,
+        pack_mv: int | None = None,
+        pack_ma: int | None = None,
+        remaining_mah: int | None = None,
+        vbus_mv: int | None = None,
+        vbus_ma: int | None = None,
+        vbus_mw: int | None = None,
+        minutes_to_empty: int | None = None,
+        minutes_to_full: int | None = None,
+        power_source: str | None = None,
+        charge_state: str | None = None,
+        cells_mv: Sequence[int] | None = None,
+        gauge_ok: bool | None = None,
+        charger_ok: bool | None = None,
+    ) -> int:
+        """Insert one UPS telemetry sample and return the new row ID."""
+        cells_json = json.dumps(list(cells_mv)) if cells_mv is not None else None
+
+        try:
+            cursor = self._conn.execute(
+                """
+                INSERT INTO battery_samples (
+                    timestamp, percent, pack_mv, pack_ma, remaining_mah,
+                    vbus_mv, vbus_ma, vbus_mw, minutes_to_empty,
+                    minutes_to_full, power_source, charge_state, cells_mv,
+                    gauge_ok, charger_ok
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    timestamp, percent, pack_mv, pack_ma, remaining_mah,
+                    vbus_mv, vbus_ma, vbus_mw, minutes_to_empty,
+                    minutes_to_full, power_source, charge_state, cells_json,
+                    None if gauge_ok is None else int(gauge_ok),
+                    None if charger_ok is None else int(charger_ok),
+                ),
+            )
+            self._conn.commit()
+            row_id: int = cursor.lastrowid  # type: ignore[assignment]
+            logger.debug("Inserted battery sample row %d", row_id)
+            return row_id
+        except sqlite3.Error as exc:
+            logger.error("Failed to insert battery sample: %s", exc)
+            raise
+
+    def get_battery_samples(
+        self,
+        since: str | None = None,
+        power_source: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """Query UPS telemetry, newest first.
+
+        Parameters
+        ----------
+        since : str or None
+            ISO-8601 timestamp lower bound (inclusive).
+        power_source : str or None
+            Restrict to "mains" or "battery".
+        limit : int
+            Maximum number of rows to return (default 100).
+        """
+        if power_source is not None and power_source not in ("mains", "battery"):
+            raise ValueError(
+                f"power_source must be 'mains', 'battery' or None, "
+                f"got {power_source!r}"
+            )
+
+        clauses: list[str] = []
+        params: list[object] = []
+
+        if since is not None:
+            clauses.append("timestamp >= ?")
+            params.append(since)
+        if power_source is not None:
+            clauses.append("power_source = ?")
+            params.append(power_source)
+
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+
+        try:
+            cursor = self._conn.execute(
+                f"""
+                SELECT * FROM battery_samples
+                {where}
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                params,
+            )
+            return [dict(row) for row in cursor.fetchall()]
+        except sqlite3.Error as exc:
+            logger.error("Failed to query battery samples: %s", exc)
             raise
 
     def get_audio_detections(

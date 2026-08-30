@@ -266,6 +266,46 @@ class MonitoringConfig:
 
 
 @dataclass(frozen=True)
+class BatteryConfig:
+    """Telemetry from the Waveshare UPS HAT (E), and what to do about it.
+
+    On by default, for the same reason syslog is: the HAT is part of the
+    bill of materials, and reading it needs an I2C bus every Raspberry Pi
+    OS install already has. A machine without the HAT fitted gets None
+    from every read and reports nothing, which costs one I2C transfer per
+    poll and no correctness.
+
+    ``shutdown_enabled`` is the exception and defaults to **false**. The
+    config files are dpkg conffiles, so an upgrade that keeps its own
+    copy has no battery block at all and falls back to these defaults;
+    acquiring the power to halt the machine is not something an upgrade
+    should do silently. Turning it on is a deliberate local edit.
+    """
+
+    enabled: bool = True
+    i2c_bus: int = 1
+    i2c_address: int = 0x2D
+    # How often the state is checked. This bounds how long the system can
+    # be running from the pack before anything notices, so it is the
+    # interval that matters when mains fails, not the sample interval
+    # below.
+    poll_interval_seconds: float = 60.0
+    # How often a row is written to battery_samples. Polling every minute
+    # and storing every poll would be 1440 rows a day to answer a
+    # question asked in weeks. A power-source transition is stored
+    # immediately whatever this is set to.
+    sample_interval_seconds: float = 300.0
+    warn_percent: int = 40
+    # Halt the system cleanly while there is still charge to do it with.
+    # Either floor can fire: percent is the one that survives a gauge
+    # with nothing to estimate from, minutes is the one that responds to
+    # an unusually heavy load.
+    shutdown_enabled: bool = False
+    shutdown_percent: int = 15
+    shutdown_minutes: int = 10
+
+
+@dataclass(frozen=True)
 class SystemConfig:
     data_dir: str = "data"
     log_level: str = "INFO"
@@ -287,6 +327,7 @@ class Config:
     alerts: AlertConfig = field(default_factory=AlertConfig)
     syslog: SyslogConfig = field(default_factory=SyslogConfig)
     monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
+    battery: BatteryConfig = field(default_factory=BatteryConfig)
 
     @property
     def data_path(self) -> Path:
@@ -386,4 +427,5 @@ def load_config(config_path: str | Path | None = None) -> Config:
         alerts=_build_section(AlertConfig, raw.get("alerts")),
         syslog=_build_section(SyslogConfig, raw.get("syslog")),
         monitoring=_build_section(MonitoringConfig, raw.get("monitoring")),
+        battery=_build_section(BatteryConfig, raw.get("battery")),
     )

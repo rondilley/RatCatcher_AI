@@ -15,7 +15,14 @@ cameras:
     enabled: true
     # "picamera", "webcam", or "file"
     source_type: "auto"
-    resolution: [1920, 1080]
+    # Must match the aspect ratio of `capture_resolution` below. The
+    # camera loop resizes one to the other, and a resize squashes rather
+    # than crops, so 16:9 here against the sensor's 4:3 compressed every
+    # animal vertically by a third -- in the clips and in the crop the
+    # species classifier reads. 1440x1080 loses no field of view and is
+    # 4.45 MB a frame against 5.93, which the pre-event ring buffers pay
+    # 70 times per camera.
+    resolution: [1440, 1080]
     # Sensor readout size. The detector needs native-resolution pixels to
     # see a small animal: squeezing a whole 1920x1080 frame into the
     # model's 640x640 input leaves a House Finch about 17 px tall, well
@@ -37,7 +44,8 @@ cameras:
   - id: 1
     enabled: true
     source_type: "auto"
-    resolution: [1920, 1080]
+    # 4:3 to match capture_resolution -- see camera 0.
+    resolution: [1440, 1080]
     capture_resolution: [4056, 3040]
     fps: 14
     file_path: null
@@ -343,3 +351,43 @@ monitoring:
   temp_warning_c: 75
   # CPU temperature critical threshold (Celsius)
   temp_critical_c: 82
+
+# Battery telemetry from the Waveshare UPS HAT (E).
+#
+# The HAT presents an MCU at I2C 0x2d that bridges a BQ4050 fuel gauge
+# and an IP2368 charger.  Reading it is read-only by construction: the
+# two destructive registers in its map -- 0x01, which powers the board
+# off, and 0x41, which reassigns the I2C address -- have no write path
+# in this codebase at all.
+battery:
+  # Reading the HAT needs only the I2C bus, which every Raspberry Pi OS
+  # install has, so this is on by default like syslog rather than off
+  # like the panel.  A machine with no HAT fitted reports nothing.
+  enabled: true
+  i2c_bus: 1
+  i2c_address: 0x2d
+  # Bounds how long the system can be running from the pack before
+  # anything notices.  This is the interval that matters when mains
+  # fails.
+  poll_interval_seconds: 60
+  # How often a row is written to battery_samples.  Storing every poll
+  # would be 1440 rows a day to answer a question asked in weeks.  A
+  # change of power source is stored at once whatever this says.
+  sample_interval_seconds: 300
+  # Charge below which the status line and the panel report a warning.
+  warn_percent: 40
+  # Halt the system cleanly while there is still charge left to do it
+  # with.  OFF BY DEFAULT: the config files are dpkg conffiles, so an
+  # upgrade that keeps its own copy falls back to these defaults, and
+  # acquiring the power to halt the machine is not something an upgrade
+  # should do without being asked.
+  #
+  # The pack measures 4792 mAh at 16.4 V (about 78 Wh) against a load
+  # measured at 10-14 W, so a full charge is roughly 5-7 hours and 15%
+  # is something like 45 minutes of margin.
+  shutdown_enabled: false
+  shutdown_percent: 15
+  # Either floor fires.  Percent survives a gauge with nothing to
+  # estimate from; minutes responds to an unusually heavy load, and is
+  # the gauge's own estimate rather than one computed here.
+  shutdown_minutes: 10

@@ -127,6 +127,7 @@ class AudioEngine:
             "blocks_captured": 0,
             "windows_analysed": 0,
             "windows_gated": 0,
+            "windows_stored": 0,
             "identifications": 0,
             "windows_dropped": 0,
         }
@@ -440,10 +441,20 @@ class AudioEngine:
             logger.error("Could not store audio detection: %s", exc)
             return
 
+        # Two counters, because a stored row and an identification are
+        # not the same event and the difference is the whole question.
+        # This one used to be "identifications" alone and was incremented
+        # here, on every row written, so a night of gated noise that named
+        # nothing reported an identification per window. windows_gated is
+        # measured before the cooldown, so it cannot stand in for the rows
+        # actually written either.
         with self._stats_lock:
-            self._stats["identifications"] += 1
+            self._stats["windows_stored"] += 1
 
         if best is not None:
+            with self._stats_lock:
+                self._stats["identifications"] += 1
+
             # Only windows that named a species. One that passed the
             # gate and matched nothing identifies no bird, and at gate
             # rates those would bury the real songs in a forwarded log.
@@ -464,7 +475,14 @@ class AudioEngine:
                 best.confidence * 100.0,
             )
         else:
-            logger.info(
+            # Debug, not info: the same rule the forwarded log follows.
+            # A window that passed the gate and matched nothing named no
+            # bird, and the gate is deliberately permissive -- on a quiet
+            # evening these are most of the stream, and at info level they
+            # bury the identifications in journald exactly as they would
+            # in syslog. The measurement is still worth having when the
+            # gate is being tuned, so it stays, one level down.
+            logger.debug(
                 "Sound activity on channel %d, no species match (%s)",
                 channel,
                 activity,

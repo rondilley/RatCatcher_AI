@@ -138,6 +138,15 @@ def _system_line(frame: StatusFrame) -> str:
         # from reading as a fourth count column.
         f"MIC {'on' if system.audio else '--'}",
     ]
+    # Battery earns footer space only while the system is running on it.
+    # The footer already exceeds the 41 characters the 6-pixel font fits
+    # and is cut by the firmware's bounds check, so a field shown
+    # unconditionally would push the uptime off the glass to report a
+    # figure that says "nothing is wrong" all but a few hours a year.
+    # A low charge on mains is not silent either: it raises a health
+    # warning, and that is what turns the header state word to WARN.
+    if system.on_battery and system.batt_pct is not None:
+        parts.append(f"BAT {system.batt_pct}%")
     if system.temp_c is not None:
         parts.append(f"{system.temp_c:.0f}C")
     if system.disk_pct is not None:

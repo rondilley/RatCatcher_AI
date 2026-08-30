@@ -172,7 +172,10 @@ def test_native_window_finds_what_the_whole_frame_misses():
     from ratcatcher.pipeline.engine import PipelineEngine
 
     CAP_W, CAP_H = 4056, 3040
-    SCALE = CAP_W / 1920
+    # 16:9 deliberately, against the sensor's 4:3.  The two axes then
+    # scale differently, which is the case a single scale gets wrong.
+    FRAME_W, FRAME_H = 1920, 1080
+    SCALE = (CAP_W / FRAME_W, CAP_H / FRAME_H)
     OBJ_H = 62          # a House Finch at this feeder's measured framing
 
     crops = _animal_crops(20)
@@ -183,11 +186,13 @@ def test_native_window_finds_what_the_whole_frame_misses():
     try:
         for crop in crops:
             capture, ox, oy, obj_w = _compose(crop, OBJ_H, CAP_W, CAP_H)
-            frame = cv2.resize(capture, (1920, 1080), interpolation=cv2.INTER_AREA)
+            frame = cv2.resize(
+                capture, (FRAME_W, FRAME_H), interpolation=cv2.INTER_AREA
+            )
 
             whole = DetectionEvent(
                 timestamp=datetime.now(), camera_id=0, frame=frame,
-                frame_width=1920, frame_height=1080,
+                frame_width=FRAME_W, frame_height=FRAME_H,
             )
             if engine._detect_for(whole):
                 whole_hits += 1
@@ -198,7 +203,7 @@ def test_native_window_finds_what_the_whole_frame_misses():
             wx, wy, ww, wh = win.bounds
             cropped = DetectionEvent(
                 timestamp=datetime.now(), camera_id=0, frame=frame,
-                frame_width=1920, frame_height=1080,
+                frame_width=FRAME_W, frame_height=FRAME_H,
                 crops=[(capture[wy : wy + wh, wx : wx + ww].copy(), wx, wy)],
                 capture_scale=SCALE,
             )
@@ -208,16 +213,20 @@ def test_native_window_finds_what_the_whole_frame_misses():
             window_hits += 1
 
             # Every box must come back in frame coordinates, and at least
-            # one must land on the animal.
-            cx = (ox + obj_w / 2) / SCALE
-            cy = (oy + OBJ_H / 2) / SCALE
-            for d in found:
+            # one must land on the animal.  Each axis by its own scale:
+            # deriving cy from the width ratio would restate whatever
+            # _detect_for did rather than check it.
+            cx = (ox + obj_w / 2) / SCALE[0]
+            cy = (oy + OBJ_H / 2) / SCALE[1]
+            for d, _detail, _dbox in found:
                 bx, by, bw, bh = d.bbox
-                assert 0 <= bx <= 1920 and 0 <= by <= 1080, f"box off-frame: {d.bbox}"
+                assert 0 <= bx <= FRAME_W and 0 <= by <= FRAME_H, (
+                    f"box off-frame: {d.bbox}"
+                )
             if any(
                 d.bbox[0] <= cx <= d.bbox[0] + d.bbox[2]
                 and d.bbox[1] <= cy <= d.bbox[1] + d.bbox[3]
-                for d in found
+                for d, _detail, _dbox in found
             ):
                 placed_ok += 1
     finally:
@@ -233,3 +242,160 @@ def test_native_window_finds_what_the_whole_frame_misses():
         f"only {placed_ok} of {window_hits} boxes landed on the animal -- "
         "the window-to-frame coordinate mapping is wrong"
     )
+
+
+# -- Coordinate mapping and the detail patch -----------------------------------
+#
+# The mapping test above needs the NPU.  This one does not: the ONNX is
+# committed and the OpenCV DNN backend is a real detector on the CPU, so
+# the coordinate arithmetic is checked on any machine and without
+# contending with the running service for the Hailo device.
+
+_ONNX = Path(__file__).parent.parent / "models" / "ratcatcher_best.onnx"
+
+requires_cpu_model = pytest.mark.skipif(
+    not (_ONNX.exists() and _VAL.exists()),
+    reason="needs the ONNX model and the val set",
+)
+
+
+def test_cut_detail_floors_a_small_box_at_the_minimum():
+    """A finch-sized box must not yield a finch-sized patch."""
+    from ratcatcher.pipeline.engine import _DETAIL_MIN, _cut_detail
+
+    window = np.full((640, 640, 3), 70, dtype=np.uint8)
+    patch, box = _cut_detail(window, (300, 300, 50, 62))
+
+    assert patch.shape[:2] == (_DETAIL_MIN, _DETAIL_MIN)
+    bx, by, bw, bh = box
+    # The box keeps its native size and stays inside the patch.
+    assert (bw, bh) == (50, 62)
+    assert 0 <= bx and bx + bw <= _DETAIL_MIN
+    assert 0 <= by and by + bh <= _DETAIL_MIN
+
+
+def test_cut_detail_pads_a_large_box_and_stays_inside_the_window():
+    """Padding is proportional above the floor, and clamped at the edge."""
+    from ratcatcher.pipeline.engine import _DETAIL_PAD, _cut_detail
+
+    window = np.full((640, 640, 3), 70, dtype=np.uint8)
+
+    patch, _box = _cut_detail(window, (200, 200, 200, 160))
+    assert patch.shape[0] == int(200 * _DETAIL_PAD)
+
+    # A box against the corner still yields a full square, not a sliver.
+    corner, box = _cut_detail(window, (600, 600, 40, 40))
+    assert corner.shape[:2] == (256, 256)
+    bx, by, _bw, _bh = box
+    assert bx >= 0 and by >= 0
+
+
+def test_cut_detail_does_not_hold_the_window_alive():
+    """The patch is copied: a view would keep 1.2 MB per queued event."""
+    from ratcatcher.pipeline.engine import _cut_detail
+
+    window = np.full((640, 640, 3), 70, dtype=np.uint8)
+    patch, _box = _cut_detail(window, (300, 300, 50, 62))
+    assert patch.base is None
+
+
+@requires_cpu_model
+def test_box_from_a_window_lands_on_the_animal_near_the_frame_bottom():
+    """The regression for the single-scale mapping.
+
+    An animal in the bottom quarter of the sensor is where a
+    width-derived scale sends the box off the frame entirely: capture
+    y=2800 maps to 1325 in a 1080-tall frame instead of 995.  The animal
+    is deliberately large, because this asserts the arithmetic, not
+    recall -- recall at bird scale is the NPU test above.
+    """
+    from ratcatcher.detection.opencv_detector import OpenCVDetector
+    from ratcatcher.pipeline.engine import PipelineEngine
+
+    CAP_W, CAP_H = 4056, 3040
+    FRAME_W, FRAME_H = 1920, 1080          # 16:9 against the sensor's 4:3
+    SCALE = (CAP_W / FRAME_W, CAP_H / FRAME_H)
+    OBJ_H = 400
+    AT = (2600, 2000)                      # (y, x), bottom quarter
+
+    engine = PipelineEngine(load_config())
+    engine._detector = OpenCVDetector(str(_ONNX), confidence_threshold=0.25)
+
+    checked = 0
+    for crop in _animal_crops(6):
+        capture, ox, oy, obj_w = _compose(crop, OBJ_H, CAP_W, CAP_H, at=AT)
+        frame = cv2.resize(
+            capture, (FRAME_W, FRAME_H), interpolation=cv2.INTER_AREA
+        )
+
+        win = plan_windows(
+            [_region(ox, oy, obj_w, OBJ_H)], CAP_W, CAP_H, window=640
+        )[0]
+        wx, wy, ww, wh = win.bounds
+        event = DetectionEvent(
+            timestamp=datetime.now(), camera_id=0, frame=frame,
+            frame_width=FRAME_W, frame_height=FRAME_H,
+            crops=[(capture[wy : wy + wh, wx : wx + ww].copy(), wx, wy)],
+            capture_scale=SCALE,
+        )
+
+        found = engine._detect_for(event)
+        if not found:
+            continue
+        checked += 1
+
+        cx = (ox + obj_w / 2) / SCALE[0]
+        cy = (oy + OBJ_H / 2) / SCALE[1]
+        assert any(
+            d.bbox[0] <= cx <= d.bbox[0] + d.bbox[2]
+            and d.bbox[1] <= cy <= d.bbox[1] + d.bbox[3]
+            for d, _detail, _dbox in found
+        ), (
+            f"no box landed on the animal at frame ({cx:.0f}, {cy:.0f}); "
+            f"got {[d.bbox for d, _, _ in found]} -- a box near y="
+            f"{(oy + OBJ_H / 2) / SCALE[0]:.0f} means the vertical scale "
+            "came from the frame width"
+        )
+
+        for d, detail, detail_bbox in found:
+            bx, by, bw, bh = d.bbox
+            assert 0 <= bx and bx + bw <= FRAME_W, f"box off-frame: {d.bbox}"
+            assert 0 <= by and by + bh <= FRAME_H, f"box off-frame: {d.bbox}"
+
+            # Every windowed detection carries native pixels for the
+            # thumbnail, with its box expressed against them.
+            assert detail is not None and detail_bbox is not None
+            dh, dw = detail.shape[:2]
+            assert dw >= 256 and dh >= 256
+            # The box may spill past the window -- YOLO returns boxes
+            # that run off the edge of what it was shown -- so what
+            # matters is that it overlaps the patch, which is all
+            # cv2.rectangle can draw anyway.
+            dbx, dby, dbw, dbh = detail_bbox
+            assert dbw > 0 and dbh > 0
+            assert dbx < dw and dby < dh
+            assert dbx + dbw > 0 and dby + dbh > 0
+
+    assert checked, "the CPU detector found nothing to check the mapping with"
+
+
+@requires_cpu_model
+def test_whole_frame_detections_carry_no_detail_patch():
+    """No window, no native pixels -- the thumbnail falls back to the frame."""
+    from ratcatcher.detection.opencv_detector import OpenCVDetector
+    from ratcatcher.pipeline.engine import PipelineEngine
+
+    engine = PipelineEngine(load_config())
+    engine._detector = OpenCVDetector(str(_ONNX), confidence_threshold=0.25)
+
+    crop = _animal_crops(1)[0]
+    frame = cv2.resize(crop, (1920, 1080), interpolation=cv2.INTER_AREA)
+    event = DetectionEvent(
+        timestamp=datetime.now(), camera_id=0, frame=frame,
+        frame_width=1920, frame_height=1080,
+    )
+
+    found = engine._detect_for(event)
+    assert found, "a full-frame animal should be detectable"
+    for _det, detail, detail_bbox in found:
+        assert detail is None and detail_bbox is None
