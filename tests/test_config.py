@@ -125,11 +125,11 @@ class TestMotionConfigDefaults:
         assert m.history == 500
         assert m.var_threshold == 16
         assert m.detect_shadows is False
-        assert m.process_width == 320
-        assert m.process_height == 240
+        assert m.process_width == 640
+        assert m.process_height == 480
         assert m.erode_kernel == 3
         assert m.dilate_kernel == 7
-        assert m.min_area_pct == pytest.approx(0.005)
+        assert m.min_area_pct == pytest.approx(0.0002)
         assert m.cooldown_seconds == pytest.approx(2.0)
         assert m.learning_rate == pytest.approx(-1.0)
 

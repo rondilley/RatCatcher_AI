@@ -50,14 +50,29 @@ motion:
   history: 500
   var_threshold: 16
   detect_shadows: false
-  # Processing resolution (independent of camera resolution)
-  process_width: 320
-  process_height: 240
+  # Processing resolution (independent of camera resolution).
+  # 640x480 rather than 320x240 because the targets are small.  At
+  # 4056x3040 capture a House Finch is about 62 px tall and a squirrel
+  # about 110 px (the sizing under "Why the detector sees a window, not
+  # the frame"), which at 320x240 becomes about 5 px and 9 px.  A 5 px
+  # blob does not survive the 3x3 erosion below, so the bird was erased
+  # before the area filter ever saw it.  At 640x480 the same bird is
+  # about 10 px and comes through.
+  process_width: 640
+  process_height: 480
   # Morphological cleanup
   erode_kernel: 3
   dilate_kernel: 7
-  # Minimum contour area as percentage of frame area (0.0 - 1.0)
-  min_area_pct: 0.005
+  # Minimum contour area as a fraction of frame area.  This is the floor
+  # that decides which animals exist at all: motion runs before the ROI
+  # windows are planned, so a region rejected here never reaches the
+  # detector.  The old 0.005 meant 384 px2 at 320x240, which back-scales
+  # to a 248x248 px object at sensor resolution -- bigger than a cat, so
+  # no bird and no squirrel could ever pass it, and the detections table
+  # held zero rows for the life of the database.  0.0002 is 61 px2 at
+  # 640x480, and a finch presents about 154 px2 after the dilation above,
+  # so it clears with roughly 2.5x margin.
+  min_area_pct: 0.0002
   # Maximum contour area as a fraction of frame area. A cloud crossing the
   # sun, or an auto-exposure step, changes every pixel at once and MOG2
   # reports it as a single region covering ~99% of the frame. Measured on
@@ -318,6 +333,12 @@ syslog:
 monitoring:
   # System health check interval in seconds
   health_interval_seconds: 60
+  # How often the pipeline logs its own counters: frames captured, motion
+  # events, ROI windows cut, detections, and what was stored or dropped.
+  # This is the line that says which stage a frame died at -- motion
+  # firing with no crops means the ROI path is off, crops with no
+  # detections means the model or the lens.  Set to 0 to disable.
+  pipeline_stats_interval_seconds: 300
   # CPU temperature warning threshold (Celsius)
   temp_warning_c: 75
   # CPU temperature critical threshold (Celsius)

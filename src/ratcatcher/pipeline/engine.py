@@ -197,6 +197,13 @@ class PipelineEngine:
         )
         self._threads.append(t)
 
+        t = threading.Thread(
+            target=self._stats_loop,
+            daemon=True,
+            name="stats",
+        )
+        self._threads.append(t)
+
         for t in self._threads:
             t.start()
 
@@ -639,3 +646,56 @@ class PipelineEngine:
                         )
 
         logger.info("Storage loop ended")
+
+    def _stats_loop(self) -> None:
+        """Log the pipeline counters every interval.
+
+        The counters name the stage a frame died at, which no other
+        record does: a motion event that yields no detection is dropped
+        silently in ``_detection_loop``, so a pipeline seeing nothing and
+        a pipeline whose gate rejects everything look identical in the
+        log and in the database.  They used to print only from
+        ``stop()``, so reading them meant stopping the cameras.
+
+        On the ordinary pipeline logger rather than ``ratcatcher.events``
+        deliberately.  That stream is kept to sightings and the status
+        line so a loghost can carry it; this is diagnostic, and journald
+        has it either way.
+        """
+        interval = self._config.monitoring.pipeline_stats_interval_seconds
+        if interval <= 0:
+            return
+
+        logger.info("Pipeline stats every %.0fs", interval)
+
+        previous = self.stats
+        previous_at = time.monotonic()
+
+        # wait() returns True once stop() sets the event, so shutdown
+        # does not have to outlast a full interval.
+        while not self._stop_event.wait(interval):
+            now = time.monotonic()
+            current = self.stats
+            elapsed = now - previous_at
+
+            # Aggregate across cameras, and measured rather than
+            # configured: the gap between the two is the ISP downscale
+            # in the camera loop.
+            captured = current["frames_captured"] - previous["frames_captured"]
+            fps = captured / elapsed if elapsed > 0 else 0.0
+
+            logger.info(
+                "pipeline fps=%.1f frames=%d motion=%d crops=%d "
+                "detections=%d classifications=%d stored=%d dropped=%d",
+                fps,
+                current["frames_captured"],
+                current["motion_events"],
+                current["crop_windows"],
+                current["detections"],
+                current["classifications"],
+                current["stored"],
+                current["dropped_frames"],
+            )
+
+            previous = current
+            previous_at = now

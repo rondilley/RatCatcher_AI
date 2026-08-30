@@ -37,8 +37,8 @@ class MotionConfig:
     history: int = 500
     var_threshold: int = 16
     detect_shadows: bool = False
-    process_width: int = 320
-    process_height: int = 240
+    process_width: int = 640
+    process_height: int = 480
     erode_kernel: int = 3
     dilate_kernel: int = 7
     # Upper bound on a region, as a fraction of frame area.  A cloud
@@ -47,7 +47,12 @@ class MotionConfig:
     # illumination change, not an animal.  1.0 keeps the old behaviour of
     # accepting anything.
     max_area_pct: float = 1.0
-    min_area_pct: float = 0.005
+    # Lower bound on a region, as a fraction of frame area.  Motion runs
+    # before the ROI windows are planned, so anything rejected here never
+    # reaches the detector at all.  Sized for the smallest target rather
+    # than for a comfortable noise margin: see the derivation in
+    # config/default.yaml.
+    min_area_pct: float = 0.0002
     cooldown_seconds: float = 2.0
     learning_rate: float = -1.0
 
@@ -250,6 +255,12 @@ class SyslogConfig:
 @dataclass(frozen=True)
 class MonitoringConfig:
     health_interval_seconds: int = 60
+    # How often the pipeline reports its own counters.  These say which
+    # stage a frame died at, and until this existed they printed only at
+    # shutdown -- so reading them meant stopping the pipeline, and the
+    # one time it mattered the answer had to come out of a previous
+    # run's exit line.  0 disables the line.
+    pipeline_stats_interval_seconds: float = 300.0
     temp_warning_c: float = 75.0
     temp_critical_c: float = 82.0
 
