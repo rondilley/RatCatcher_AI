@@ -76,6 +76,13 @@ flowchart LR
 
 ## Hardware
 
+![RatCatcher sensor with the enclosure door open](docs/RatCatcher_Sensor.jpg)
+
+The sensor in its first enclosure, with the door open. The two UC-517
+cameras are at the top. The two SPH0645 microphones are on the door,
+each behind an acoustic vent membrane. The Raspberry Pi 5, the AI HAT+
+and the UPS HAT are in the stack below the cameras.
+
 | Component | Model | Purpose |
 |---|---|---|
 | Computer | Raspberry Pi 5 (4GB) | Main controller |
