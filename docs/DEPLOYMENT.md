@@ -357,7 +357,12 @@ cp config/species.yaml /opt/ratcatcher/config/
 ```
 
 Change `/opt/ratcatcher/config/default.yaml` for your installation:
-- Set the camera resolution and the FPS
+- Set the camera resolution and the FPS. If you change `resolution`,
+  keep its aspect ratio equal to `capture_resolution` -- the camera loop
+  resizes one to the other and a resize squashes rather than crops, so a
+  mismatch compresses every animal in the clips and in the crop the
+  species classifier reads. The shipped pair is 1440x1080 against the
+  sensor's 4056x3040.
 - Set data_dir to `/opt/ratcatcher/data`
 - Tune the motion detection sensitivity for your feeder location
 - Set the retention days and the maximum disk use

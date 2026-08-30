@@ -98,10 +98,19 @@ recovers the pests but not the birds.
 37 MB, the pre-event ring buffer holds `fps * clip_pre_seconds` = 70 of
 them, and the detection queue holds 64 more. So the capture frame is used
 for exactly two things -- motion detection and cutting windows -- and what
-is enqueued is the 1920x1080 downscale plus the windows at 1.2 MB each.
+is enqueued is the 1440x1080 downscale plus the windows at 1.2 MB each.
 `DetectionEvent.capture_scale` maps a box found in a window back onto
-that frame, which is what the classifier crop, the thumbnail and the
-stored row all use.
+that frame, which is what the classifier crop and the stored row use.
+
+`capture_scale` is a **pair**, one factor per axis. The capture and the
+frame need not share an aspect ratio, and a single width-derived scale
+made every box a third too tall and put anything in the bottom quarter of
+the sensor off the frame entirely -- so the thumbnail box was misplaced
+and the classifier was cropping below the bird. `resolution` is 1440x1080
+so that the frame is 4:3 like the sensor: a resize squashes rather than
+crops, and 16:9 compressed every animal vertically by a third in the
+clips and in the crop the classifier reads. It loses no field of view and
+saves about 208 MB of ring buffer against 1920x1080.
 
 YOLOv8n puts the objects it finds into five categories:
 
@@ -136,18 +145,27 @@ animals=unknown_animal). COCO has no squirrel class and no rat class.
 ### Stage 2: Species Classification
 
 This stage runs only when Stage 1 finds a bird. It crops the bird area
-from the full-resolution frame and classifies the crop.
+from the downscaled pipeline frame -- not the full-resolution capture,
+which never leaves the camera loop -- and classifies the crop.
 
 - **Model:** MobileNet V2 iNaturalist Bird Classifier
 - **Format:** TFLite INT8 quantized (3.6 MB)
 - **Species:** 965 bird species. The taxonomy holds 50 Western US feeder species
 - **Input:** 224x224 RGB
-- **Output:** softmax on 965 classes
-- **Threshold:** a prediction below 70% confidence becomes unknown
+- **Output:** softmax on 965 classes, of which only the indices the
+  taxonomy maps are scored
+- **Threshold:** a prediction below 70% confidence yields no species
 
 The taxonomy maps the model output indices to the species data (Genus,
-Species, Common Name, Family). A species that is not in the taxonomy
-shows as "unknown_NNN".
+Species, Common Name, Family). Only those indices are ranked, and the
+scores are deliberately **not** renormalised over them: a bird outside
+the taxonomy then reads as a low number against every species we know
+and is correctly declined, where renormalising would redistribute its
+probability mass into a confident wrong answer. A Common Hoopoe scoring
+0.996 has under 0.001 on all 50 and yields None. An earlier version
+ranked all 965 and synthesised an "unknown_NNN" species for whatever
+won, which could put the model's own `background` class in the database
+as a sighting.
 
 ## Audio Pipeline (Isolated Detector)
 
@@ -458,8 +476,25 @@ Optional H.264 MP4 clips around a detection event:
 
 ### Thumbnails
 
-JPEG images with a bounding box on top, resized to 320 px on the
-longest edge. One thumbnail for each detection event.
+JPEG images with a bounding box on top, one per detection event, never
+enlarged. A thumbnail cut from native pixels is written at its own size
+(up to the 640 px detection window); only the whole-frame fallback is
+reduced to 320 px on the longest edge.
+
+They are cut from **native sensor pixels**, not from the downscaled
+frame. A whole 1440x1080 frame reduced to 320 leaves a House Finch under
+4 px -- smaller than one 8x8 JPEG block, with nothing left to recognise.
+So `_detect_for` cuts a square around the box out of the native detection
+window at the moment it finds it, 2x the box with a 256 px floor, and
+that patch is what gets written. The windows themselves cannot travel
+that far: the storage queue holds 256 events and each window is 1.2 MB.
+
+The box is drawn **after** the resize. Drawn before, a 2 px line met a
+6x reduction as a third of a pixel of coverage -- a green wash rather
+than a rectangle.
+
+Motion-only events, and any run with `detection.roi_crop` off, have no
+native window and fall back to the whole downscaled frame.
 
 ### Retention
 

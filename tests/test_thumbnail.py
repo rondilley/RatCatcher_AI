@@ -291,3 +291,37 @@ def test_storage_falls_back_to_the_frame_without_a_patch(tmp_path: Path):
     assert event.thumbnail_path is not None, "no thumbnail was written"
     img = cv2.imread(event.thumbnail_path)
     assert max(img.shape[:2]) == 320
+
+
+def test_a_large_patch_is_not_reduced_to_320(tmp_path: Path):
+    """Native pixels must reach the file.
+
+    `_cut_detail` cuts up to the full detection window, so a big animal
+    yields a patch well over 320 px.  Writing that through the 320
+    default threw away half the detail the cut existed to keep.
+    """
+    from datetime import datetime
+
+    from ratcatcher.pipeline.event import DetectionEvent
+
+    bird = cv2.resize(_bird(), (512, 512), interpolation=cv2.INTER_AREA)
+
+    engine = _engine_writing_to(tmp_path)
+    event = DetectionEvent(
+        timestamp=datetime.now(), camera_id=0,
+        frame=np.full((FRAME_H, FRAME_W, 3), 70, dtype=np.uint8),
+        frame_width=FRAME_W, frame_height=FRAME_H,
+        stage="detection", class_name="bird", confidence=0.8,
+        bbox=(100, 100, 20, 20),
+        detail=bird, detail_bbox=(120, 130, 260, 240),
+    )
+    engine._storage_queue.put(event)
+
+    thread = _run_storage(engine)
+    _drain(engine, thread, event)
+
+    img = cv2.imread(event.thumbnail_path)
+    assert img.shape[:2] == (512, 512), (
+        f"patch written at {img.shape[:2]}, not its own 512x512 -- the "
+        "frame's 320 cap was applied to native pixels"
+    )

@@ -47,6 +47,12 @@ _SENTINEL = object()
 _DETAIL_PAD = 2.0
 _DETAIL_MIN = 256
 
+# Longest edge for a thumbnail cut from the downscaled frame.  The detail
+# patch is not held to this: it was sized deliberately by _cut_detail, and
+# reducing a square of native pixels is the thing cutting it was meant to
+# avoid.
+_FRAME_THUMB_MAX = 320
+
 
 def _cut_detail(
     window: np.ndarray, bbox: tuple[int, int, int, int]
@@ -685,10 +691,12 @@ class PipelineEngine:
                 # (motion-only rows, or the ROI-crop path turned off).
                 if event.detail is not None:
                     source, box = event.detail, event.detail_bbox
+                    limit = max(source.shape[:2])
                 else:
                     source, box = event.frame, event.bbox
+                    limit = _FRAME_THUMB_MAX
                 try:
-                    create_thumbnail(source, box, thumb_path)
+                    create_thumbnail(source, box, thumb_path, max_size=limit)
                     event.thumbnail_path = str(thumb_path)
                 except Exception:
                     logger.exception("Failed to create thumbnail")
