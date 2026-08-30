@@ -4,6 +4,13 @@ Wildlife detection system for bird feeders. The system identifies birds
 to Genus and Species from the cameras *and* from the microphones. It also detects pest
 animals (squirrels, rats, cats) in real-time on a Raspberry Pi 5.
 
+![Six detection thumbnails, each with the detector's bounding box](docs/bird_mosaic.jpg)
+
+Six detections as they were stored, in flight and perched at the
+feeder. The green box is the object detector's output, drawn by the
+thumbnail writer onto the native-resolution patch cut around the
+animal.
+
 ## How It Works
 
 Two cameras look at the bird feeders continuously. When the system
