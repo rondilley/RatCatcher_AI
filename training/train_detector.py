@@ -20,6 +20,8 @@ from pathlib import Path
 import torch
 from ultralytics import YOLO
 
+import rocm_compat
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -98,18 +100,23 @@ def detect_device(requested: str) -> str:
     """Resolve the compute device.
 
     Returns the device string that Ultralytics model.train() expects:
-    a CUDA device index like "0", or "cpu".
+    a GPU device index like "0", or "cpu". On ROCm builds of PyTorch the
+    CUDA API is the HIP API under its old name, so the same calls answer
+    for an AMD card.
     """
     if requested != "auto":
         return requested
 
     if torch.cuda.is_available():
-        gpu_name = torch.cuda.get_device_name(0)
-        gpu_mem_gb = torch.cuda.get_device_properties(0).total_mem / (1024 ** 3)
-        print(f"[INFO] CUDA GPU detected: {gpu_name} ({gpu_mem_gb:.1f} GB)")
+        props = torch.cuda.get_device_properties(0)
+        gpu_mem_gb = props.total_memory / (1024 ** 3)
+        backend = "ROCm" if torch.version.hip else "CUDA"
+        arch = getattr(props, "gcnArchName", "")
+        detail = f" [{arch}]" if arch else ""
+        print(f"[INFO] {backend} GPU detected: {props.name}{detail} ({gpu_mem_gb:.1f} GB)")
         return "0"
 
-    print("[WARNING] No CUDA GPU detected -- training will run on CPU.")
+    print("[WARNING] No GPU detected -- training will run on CPU.")
     print("[WARNING] CPU training is extremely slow. Consider using a machine with a GPU.")
     return "cpu"
 
@@ -191,6 +198,11 @@ def main() -> None:
     # Detect device
     device = detect_device(args.device)
     print(f"[INFO] Device          : {device}")
+
+    # RDNA3.5 integrated GPUs need a batchnorm shim; see training/rocm_compat.py.
+    # A no-op on every other device, including CUDA.
+    for note in rocm_compat.apply():
+        print(note)
     print("")
 
     # Load model -- either fresh or resume from checkpoint

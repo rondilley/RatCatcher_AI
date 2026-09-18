@@ -675,38 +675,127 @@ a HEF, and **you cannot do that on the Pi**. The Hailo Dataflow
 Compiler is an x86-64 Linux wheel (Python 3.8-3.11) with no aarch64
 build.
 
-On an x86-64 Ubuntu 20.04 or 22.04 machine:
+The Pi is the target of the build, not the machine that makes it. The
+build machine for this project is the x86-64 training box.
+
+**One-time setup of the build machine.** The DFC venv is in the repo
+root as `dfc-venv/`. If it is not there:
 
 ```bash
 # 1. Get the DFC (a free account is necessary) from
 #    https://hailo.ai/developer-zone/software-downloads/
 #    The DFC major version must agree with the HailoRT on the Pi (4.23).
-python3 -m venv dfc-venv
+#    The DFC has no wheel for Python 3.12 or later. This box uses
+#    python3.10 from ~/.local/bin. DFC 3.34.0 operates on Ubuntu 26.04.
+python3.10 -m venv dfc-venv
 ./dfc-venv/bin/pip install hailo_dataflow_compiler-*.whl
-
-# 2. Clone this repo, then copy the two gitignored inputs.
-scp pi:RatCatcher_AI/models/ratcatcher_best.onnx models/
-rsync -a pi:RatCatcher_AI/datasets/ datasets/     # or: python training/download_data.py
-
-# 3. Build. Use the architecture that
-#    'hailortcli fw-control identify' reports on the Pi. A hailo8l HEF
-#    runs on a Hailo-8, but a hailo8 HEF will NOT load on a Hailo-8L.
-PYTHON=./dfc-venv/bin/python HAILO_ARCH=hailo8l ./scripts/build_hef.sh
 ```
 
-Copy the result back, and make sure that it is the custom model and not
-COCO:
+The DFC venv has no OpenCV. The calibration step must have it, so that
+step uses the training venv (`venv/`) and the compile step uses the DFC
+venv.
+`build_hef.sh` stops with a message if you give it a DFC venv and no
+calibration set.
+
+**Build.** Four commands, from the repo root on the build machine:
 
 ```bash
-scp models/ratcatcher_best.hef pi:RatCatcher_AI/models/
+# 1. The ONNX. The training run exports one; models/*.onnx is gitignored.
+mkdir -p models/v3
+cp runs/detect/runs/train/ratcatcher_v3b/weights/best.onnx models/v3/ratcatcher_best.onnx
+
+# 2. The INT8 calibration set: 256 frames from the train split that the
+#    detector learned from. For v3 that split holds infrared night
+#    frames, and 60 of the 256 samples are monochrome. The quantizer
+#    then sees the domain the detector runs in.
+venv/bin/python3 training/build_calibration_set.py \
+    --images datasets/ratcatcher_v3/train/images \
+    --output models/v3/calibration_set.npy --count 256
+
+# 3. Compile. The board in the enclosure is a Hailo-8 ('hailortcli
+#    fw-control identify' on the Pi says HAILO8), so the target is
+#    hailo8. An 8L HEF runs on a Hailo-8 with a warning on each load
+#    and at lower speed. A hailo8 HEF does NOT load on a Hailo-8L.
+#    HAR keeps the quantized archive for step 4. About two minutes.
+PYTHON=./dfc-venv/bin/python HAILO_ARCH=hailo8 \
+    ONNX=models/v3/ratcatcher_best.onnx \
+    CALIB=models/v3/calibration_set.npy \
+    OUTPUT=models/v3/ratcatcher_best.hef \
+    HAR=models/v3/ratcatcher_best_quantized.har \
+    ./scripts/build_hef.sh
+
+# 4. Measure what INT8 cost, on this machine, with no NPU. The DFC runs
+#    the quantized graph on the CPU. This runs it and the ONNX on the
+#    same frames with the same decode and the same scoring code. About
+#    eight minutes for the 938 night frames.
+dfc-venv/bin/python training/compare_hef_accuracy.py \
+    --onnx models/v3/ratcatcher_best.onnx \
+    --har models/v3/ratcatcher_best_quantized.har \
+    --data datasets/eval_ct_night --limit 0
+```
+
+`scripts/build_hef.sh` makes these checks: x86-64, `hailo_sdk_client`
+importable, the ONNX is there, the calibration set is there or the
+script can build it. Then it runs `training/build_hef.py`.
+
+`build_hef.py` cuts the graph at the six `model.22` head convolutions. It attaches the
+decode and the NMS as a HailoRT post-process. It compiles the
+normalization (mean 0, std 255) into the HEF. The result must start
+with the bytes `\x01HEF`, and the shell script checks that too.
+
+Do not use the plain `hailo parser`, `hailo optimize` and `hailo
+compile` commands. They compile the Ultralytics decode tail onto the
+NPU, and the result does not agree with what `HailoDetector` reads.
+
+**Result of the build on 2026-09-17, v3 detector.** `models/v3/
+ratcatcher_best.hef`, 4.2 MB, hailo8. The INT8 cost on 938 held-out
+night camera-trap frames, score floor 0.2 for the two models:
+
+| | ONNX (float) | HAR (INT8) | cost |
+|---|---:|---:|---:|
+| rat AP50 | 0.658 | 0.622 | -0.036 |
+| cat AP50 | 0.727 | 0.649 | -0.078 |
+| rat precision at conf 0.45 | 0.882 | 0.832 | -0.050 |
+| rat recall at conf 0.45 | 0.577 | 0.572 | -0.005 |
+| empty frames with a detection | 0 of 224 | 1 of 224 | +1 |
+
+The recall at the deployment threshold is the same. The cost is
+precision: 15 more incorrect rat boxes in 938 frames. If that cost is
+too high, the first change to try is `--count 1024` on the calibration
+set.
+
+**Put the build at the deploy names.** The factory looks for a `.hef`
+with the same stem as `detection.model_path`, which is
+`ratcatcher_best.onnx`. So the deployed files are
+`models/ratcatcher_best.onnx` and `models/ratcatcher_best.hef`. Each
+generation also keeps its own copy in `models/vN/`, so you can compare
+two generations:
+
+```bash
+cp models/v3/ratcatcher_best.onnx models/v3/ratcatcher_best.hef \
+   models/v3/ratcatcher_best_nms_config.json models/
+```
+
+**Deploy.** Copy the two model files to the Pi. Then make sure that
+the HEF is the custom model and not COCO:
+
+```bash
+scp models/ratcatcher_best.onnx models/ratcatcher_best.hef pi:RatCatcher_AI/models/
 
 # On the Pi -- this must say 5 classes, not 80:
 hailortcli parse-hef models/ratcatcher_best.hef
+sudo systemctl restart ratcatcher
 ```
 
 No config change is necessary. `config/default.yaml` names
 `ratcatcher_best.onnx`, and the factory changes the suffix to `.hef` on
-the Hailo path. Thus the system uses the NPU at the next restart.
+the Hailo path. Thus the system uses the NPU at the next restart. The
+ONNX goes too: it is the CPU fallback when the NPU is not available.
+
+The build machine has no HailoRT, so `parse-hef` cannot run there. The
+check that is possible on the build machine is the shape of the
+emulator's NMS output, `(1, 5, 5, 100)`: 5 classes and 100 proposals
+for each class. A COCO build gives 80.
 
 ### The microphones are silent or defective
 

@@ -31,6 +31,14 @@ models/*.weights
 models/*.npy
 # Hailo DFC intermediates (translated network + quantized params)
 models/*.har
+# The same binaries one level down. Each detector generation keeps its
+# ONNX, HEF, HAR and calibration set in models/vN/ so two generations
+# can be compared, and a pattern anchored at models/ does not reach them.
+models/*/*.hef
+models/*/*.onnx
+models/*/*.pt
+models/*/*.npy
+models/*/*.har
 # BirdNET labels ship with the CC BY-NC-SA model package and are
 # downloaded by scripts/download_models.sh, not committed.
 models/BirdNET_*

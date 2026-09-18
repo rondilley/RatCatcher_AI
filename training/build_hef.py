@@ -156,6 +156,17 @@ def parse_args() -> argparse.Namespace:
         default=100,
         help="Maximum surviving boxes per class.",
     )
+    parser.add_argument(
+        "--save-har",
+        type=str,
+        default=None,
+        help=(
+            "Also write the quantized Hailo archive here. The DFC can run "
+            "that archive on the CPU, which is how the INT8 accuracy cost "
+            "is measured on a machine with no NPU. Without it the only "
+            "artifact is the HEF, which nothing but the device can run."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -451,6 +462,15 @@ def build(args: argparse.Namespace) -> int:
         print(f"[ERROR] Quantization failed: {exc}")
         return 1
     print("[3/4] OK")
+    if args.save_har:
+        har_path = Path(args.save_har)
+        try:
+            har_path.parent.mkdir(parents=True, exist_ok=True)
+            runner.save_har(str(har_path))
+        except Exception as exc:  # the DFC raises its own types
+            print(f"[ERROR] Could not write {har_path}: {exc}")
+            return 1
+        print(f"[3/4] Wrote quantized archive {har_path}")
     print("")
 
     # --- 4. Compile ------------------------------------------------------

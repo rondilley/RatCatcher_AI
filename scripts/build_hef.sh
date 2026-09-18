@@ -13,26 +13,41 @@
 #
 # WHAT YOU NEED ON THE x86 BOX
 #
-#   1. Ubuntu 20.04 or 22.04, x86-64
-#   2. Python 3.8-3.11 (NOT 3.12+ -- the DFC has no wheel for it)
+#   1. x86-64 Linux. The builds here run on Ubuntu 26.04.
+#   2. Python 3.8-3.11 for the DFC venv (NOT 3.12+ -- the DFC has no
+#      wheel for it). This box uses python3.10 from ~/.local/bin.
 #   3. The Hailo Dataflow Compiler wheel, from a free account at
 #        https://hailo.ai/developer-zone/software-downloads/
 #      Match the DFC major version to the HailoRT on the Pi (4.23):
-#        python3 -m venv dfc-venv
+#        python3.10 -m venv dfc-venv
 #        ./dfc-venv/bin/pip install hailo_dataflow_compiler-*.whl
-#   4. models/ratcatcher_best.onnx -- gitignored, so copy it from the Pi:
-#        scp pi:RatCatcher_AI/models/ratcatcher_best.onnx models/
-#   5. Calibration images. Either copy the dataset from the Pi:
-#        rsync -a pi:RatCatcher_AI/datasets/ datasets/
-#      or re-fetch it here:
-#        python training/download_data.py
-#      or copy a prebuilt calibration array and skip the build step:
-#        scp pi:RatCatcher_AI/models/calibration_set.npy models/
+#      The DFC venv has no OpenCV. Step 1 below needs cv2, so either
+#      build the calibration set first with the training venv, or
+#        ./dfc-venv/bin/pip install opencv-python-headless
+#   4. The ONNX to compile. On this box it comes from the training run:
+#        runs/detect/runs/train/<run>/weights/best.onnx
+#      models/*.onnx is gitignored, so a fresh clone must copy one in.
+#   5. Calibration images: the train split of the composed dataset,
+#      e.g. datasets/ratcatcher_v3/train/images, so the quantizer sees
+#      the same domain the detector was trained on (infrared night
+#      frames included). Or a prebuilt array, which skips the build step.
 #
 # Usage:
 #   ./scripts/build_hef.sh                 # defaults to hailo8
 #   HAILO_ARCH=hailo8l ./scripts/build_hef.sh
 #   CALIB_COUNT=1024 ./scripts/build_hef.sh
+#   HAR=models/ratcatcher_best_quantized.har ./scripts/build_hef.sh
+#
+# The build that made the deployed v3 HEF on 2026-09-17:
+#   venv/bin/python3 training/build_calibration_set.py \
+#       --images datasets/ratcatcher_v3/train/images \
+#       --output models/v3/calibration_set.npy --count 256
+#   PYTHON=./dfc-venv/bin/python HAILO_ARCH=hailo8 \
+#       ONNX=models/v3/ratcatcher_best.onnx \
+#       CALIB=models/v3/calibration_set.npy \
+#       OUTPUT=models/v3/ratcatcher_best.hef \
+#       HAR=models/v3/ratcatcher_best_quantized.har \
+#       ./scripts/build_hef.sh
 
 set -euo pipefail
 
@@ -50,6 +65,10 @@ CALIB_COUNT="${CALIB_COUNT:-256}"
 ONNX="${ONNX:-models/ratcatcher_best.onnx}"
 CALIB="${CALIB:-models/calibration_set.npy}"
 OUTPUT="${OUTPUT:-models/ratcatcher_best.hef}"
+# Optional. When set, the quantized archive is kept beside the HEF so the
+# INT8 accuracy cost can be measured on this machine with the DFC's CPU
+# emulator, without a device.
+HAR="${HAR:-}"
 PYTHON="${PYTHON:-python3}"
 
 echo "=== RatCatcher AI -- Hailo HEF Build ==="
@@ -79,6 +98,20 @@ if ! ${PYTHON} -c "import hailo_sdk_client" 2>/dev/null; then
     exit 1
 fi
 echo "  OK  hailo_sdk_client importable"
+
+# Step 1 decodes JPEGs with OpenCV, which the DFC venv does not ship.
+# Say so here rather than after the environment checks have passed.
+if [ ! -f "${CALIB}" ] && ! ${PYTHON} -c "import cv2" 2>/dev/null; then
+    echo "ERROR: ${CALIB} does not exist and ${PYTHON} cannot import cv2,"
+    echo "so the calibration set cannot be built with it."
+    echo ""
+    echo "Either build the calibration set first with the training venv:"
+    echo "  venv/bin/python3 training/build_calibration_set.py \\"
+    echo "      --images datasets/ratcatcher_v3/train/images --output ${CALIB}"
+    echo "or install OpenCV into the DFC venv:"
+    echo "  ${PYTHON} -m pip install opencv-python-headless"
+    exit 1
+fi
 
 if [ ! -f "${ONNX}" ]; then
     echo "ERROR: ${ONNX} not found."
@@ -110,7 +143,8 @@ ${PYTHON} training/build_hef.py \
     --onnx "${ONNX}" \
     --calib "${CALIB}" \
     --output "${OUTPUT}" \
-    --hw-arch "${HAILO_ARCH}"
+    --hw-arch "${HAILO_ARCH}" \
+    ${HAR:+--save-har "${HAR}"}
 echo ""
 
 # ---- [3/3] Report ----

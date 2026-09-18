@@ -381,6 +381,15 @@ trusting NPU numbers. Re-quantizing happens on every HEF build, so this
 comparison has to be redone per build rather than assumed to carry
 across.
 
+*Measured 2026-09-17.* `training/compare_hef_accuracy.py` runs the
+quantized graph on the CPU with the DFC emulator, so this measurement
+no longer waits for the Pi. v3 detector, 938 held-out night camera-trap
+frames, score floor 0.2 for the two models: rat AP50 0.658 (ONNX) to
+0.622 (INT8), rat precision at conf 0.45 0.882 to 0.832, rat recall
+0.577 to 0.572, empty frames with a detection 0 to 1 of 224. The cost
+is precision, not recall. There is no field set at this time, so the
+night camera-trap set stands in for it.
+
 ---
 
 ## 6. Training
@@ -446,6 +455,12 @@ three ways to get this wrong:
 Build for `hailo8`. Deploy the ONNX as well: it is the CPU fallback and
 the reference for the quantization comparison in section 5.
 
+*Added 2026-09-17.* `scripts/build_hef.sh` accepts `HAR=<path>`, which
+keeps the quantized archive. `training/compare_hef_accuracy.py` runs
+that archive and the ONNX on the same frames and reports the cost. The
+full procedure, with the commands that made the v3 HEF, is in
+`docs/DEPLOYMENT.md`, section "Compile the custom detector for the NPU".
+
 ---
 
 ## 8. Related deployment issues, for context
@@ -499,7 +514,9 @@ Found while preparing this brief. Listed, not corrected.
 - `training/README.md` states the current HEF is compiled for 8L.
   `models/ratcatcher_best.hef` is now a symlink to
   `ratcatcher_best_hailo8.hef`, and no 8L warning appears in the logs.
-  `CLAUDE.md` carries the same stale note.
+  `CLAUDE.md` carries the same stale note. *Corrected 2026-09-17:*
+  `models/ratcatcher_best.hef` is a regular file, the v3 hailo8 build,
+  with a copy in `models/v3/`. I updated the two notes.
 - `training/README.md` describes expected results as "Bird mAP@0.5:
   0.70-0.85". The shipped model measures bird at 0.608, the weakest of
   the five classes, which is not reflected there.
@@ -524,9 +541,13 @@ immediately.
 5. Retrain once, on day hard-negatives and night data together, rather
    than retraining twice.
 6. Validate against section 5's bar. Compare ONNX against HEF on the
-   same footage to measure the INT8 cost.
+   same footage to measure the INT8 cost. *2026-09-17: measured on the
+   night camera-trap set, see section 5. There is no field footage at
+   this time.*
 7. Export, compile for `hailo8`, deploy, and re-measure false positives
    per camera-hour on the real deployment before declaring it fixed.
+   *2026-09-17: the v3 HEF is at the deploy names. The copy
+   to the Pi and the measurement there are not done.*
 
 ---
 
